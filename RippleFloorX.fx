@@ -255,7 +255,8 @@ float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
         float2 pos   = on ? m.xy : prev.zw;     // keep the last contact point
         float  lastT = (idx == winIdx) ? CurTime : prev.y;
 
-        return float4(on ? 1.0 : 0.0, lastT, pos.x, pos.y);
+        // .w = did THIS update pass see the marker?  (diagnostic readout)
+        return float4(on ? 1.0 : 0.0, lastT, pos.x, on ? 1.0 : 0.0);
     }
 
     // ---- ripple queue rows
@@ -378,7 +379,9 @@ float3 RgbToHsv(float3 c)
 //       BLACK  = neither
 //   band B (z -9.0 .. -8.0) : 24 ripple queue slots, colour = age
 //       WHITE < 1s, YELLOW < 3s, RED < 5s, BLACK = empty/expired
-//   band C (z -7.6 .. -7.0) : purple bar = this build is really compiled
+//   band D (z -8.0 .. -7.0) : foot row .w = did the UPDATE pass see the marker?
+//       GREEN = yes, BLACK = no   (compare with band A of the same slot)
+//   band C (z -6.7 .. -6.1) : purple bar = this build is really compiled
 float3 HudDiag(float2 l)
 {
     float3 c = float3(0.0, 0.0, 0.0);
@@ -422,8 +425,22 @@ float3 HudDiag(float2 l)
         c = max(c, col * mm);
     }
 
+    // ---- band D: the value the UPDATE pass stored in the foot row's .w
+    //      (= did the update pass see the marker at all)
+    [loop]
+    for (int d = 0; d < FOOT_ROWS; ++d)
+    {
+        float4 pr = StateRow(d);
+        float3 col = (pr.w > 0.5) ? float3(0.15, 1.00, 0.30)
+                                  : float3(0.05, 0.05, 0.05);
+        float2 c0 = float2(-10.0 + (float)d * 2.5, -8.0);
+        float2 dd = abs(l - (c0 + float2(1.0, 0.5))) - float2(1.0, 0.5);
+        float  mm = 1.0 - smoothstep(-0.05, 0.05, max(dd.x, dd.y));
+        c = max(c, col * mm);
+    }
+
     // ---- band C: build-live bar
-    float2 dbar = float2(abs(l.x) - 10.0, abs(l.y + 7.3) - 0.3);
+    float2 dbar = float2(abs(l.x) - 10.0, abs(l.y + 6.4) - 0.3);
     c += float3(0.30, 0.06, 0.55) * (1.0 - smoothstep(-0.05, 0.05, max(dbar.x, dbar.y)));
 
     return c;
