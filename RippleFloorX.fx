@@ -61,7 +61,7 @@ float RippleStrength <
 
 
 // debug overlay: 1 = paint the foot / trigger state along the floor edge
-#define DEBUG_HUD    0
+#define DEBUG_HUD    1
 
 // ---------------------------------------------------------------- constants
 float4x4 WorldViewProjMatrix : WORLDVIEWPROJECTION;
@@ -369,30 +369,62 @@ float3 RgbToHsv(float3 c)
 
 // ---------------------------------------------------------------- debug overlay
 #if DEBUG_HUD
-// 8 boxes along the -z edge of the floor:
-//   green = foot on the floor, blue = was on the floor last frame,
-//   magenta = this foot starts a ripple now, dark = free
-float3 HudColor(float2 l, bool canSpawn)
+// DIAGNOSTIC overlay (v1.4-diag).  Colours never overwrite each other.
+//
+//   band A (z -10.0 .. -9.0) : 8 foot slots, drawn from (on, wasOn)
+//       GREEN  = on now AND on last frame    -> steady, no edge
+//       YELLOW = on now, NOT on last frame   -> touchdown edge (the suspect)
+//       CYAN   = not on now, was on last frame -> the lift frame
+//       BLACK  = neither
+//   band B (z -9.0 .. -8.0) : 24 ripple queue slots, colour = age
+//       WHITE < 1s, YELLOW < 3s, RED < 5s, BLACK = empty/expired
+//   band C (z -7.6 .. -7.0) : purple bar = this build is really compiled
+float3 HudDiag(float2 l)
 {
     float3 c = float3(0.0, 0.0, 0.0);
 
+    // ---- band A: foot slots
     [loop]
     for (int f = 0; f < FOOT_ROWS; ++f)
     {
-        float4 st = FootState(f, canSpawn);
+        float4 m    = MarkerAt(f);
+        float4 prev = StateRow(f);
+        bool   on    = m.w > 0.5;
+        bool   wasOn = prev.x > 0.5;
 
         float2 c0 = float2(-10.0 + (float)f * 2.5, -10.0);
-        float2 d  = abs(l - (c0 + float2(1.0, 1.0))) - float2(1.0, 1.0);
-        float  m  = 1.0 - smoothstep(-0.05, 0.05, max(d.x, d.y));
+        float2 d  = abs(l - (c0 + float2(1.0, 0.5))) - float2(1.0, 0.5);
+        float  mm = 1.0 - smoothstep(-0.05, 0.05, max(d.x, d.y));
 
-        float3 col = float3(0.04, 0.04, 0.04);
-        if (st.y > 0.5) col = float3(0.10, 0.30, 1.00);
-        if (st.x > 0.5) col = float3(0.15, 1.00, 0.30);
-        if (st.z > 0.5) col = float3(1.00, 0.20, 0.90);
-
-        c = max(c, col * m);
+        float3 col = float3(0.05, 0.05, 0.05);
+        if ( wasOn &&  on) col = float3(0.15, 1.00, 0.30);   // steady
+        if (!wasOn &&  on) col = float3(1.00, 0.90, 0.10);   // EDGE
+        if ( wasOn && !on) col = float3(0.10, 0.60, 1.00);   // lift
+        c = max(c, col * mm);
     }
 
+    // ---- band B: ripple queue
+    [loop]
+    for (int i = 0; i < SLOT_COUNT; ++i)
+    {
+        float4 s = tex2D(StateASamp, float2(0.5, (FOOT_ROWS + i + 0.5) / STATE_ROWS));
+        float3 col = float3(0.05, 0.05, 0.05);
+        if (s.w > 0.5)
+        {
+            float age = CurTime - s.z;
+            if      (age >= 0.0 && age < 1.0)    col = float3(1.00, 1.00, 1.00);
+            else if (age < 3.0)                  col = float3(1.00, 0.85, 0.10);
+            else if (age < RIP_MAX)              col = float3(1.00, 0.20, 0.10);
+        }
+        float2 c0 = float2(-10.0 + (float)i * 0.83, -9.0);
+        float2 d  = abs(l - (c0 + float2(0.38, 0.5))) - float2(0.38, 0.5);
+        float  mm = 1.0 - smoothstep(-0.05, 0.05, max(d.x, d.y));
+        c = max(c, col * mm);
+    }
+
+    // ---- band C: build-live bar
+    float2 dbar = float2(abs(l.x) - 10.0, abs(l.y + 7.3) - 0.3);
+    c += float3(0.30, 0.06, 0.55) * (1.0 - smoothstep(-0.05, 0.05, max(dbar.x, dbar.y)));
 
     return c;
 }
@@ -444,9 +476,7 @@ float4 DrawFloor_PS(VS_OUT IN) : COLOR0
 
 #if DEBUG_HUD
     {
-        float4 nrip = StateRow(FOOT_ROWS);
-        bool canSpawn = (CurTime - PastTime(nrip.z) > TRIG_GAP);
-        c += HudColor(l, canSpawn);
+        c += HudDiag(l);
     }
 #endif
 
