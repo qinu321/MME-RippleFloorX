@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 //
-//  RippleFloorX.fx   ver 1.6
+//  RippleFloorX.fx   ver 1.7
 //
 //  Floor accessory effect (MikuMikuEffect 0.37 or later).
 //  Foot contacts are reported by RF_FootRipple.fxsub, which is assigned to
@@ -52,8 +52,9 @@ float RippleStrength <
 #define RIP_ROT      4.0     // triangle / square rotation (rad / sec)
 
 #define FOOT_ROWS    8       // foot state rows, kept at the front (must match fxsub)
-#define SLOT_COUNT   24      // ripple queue rows after the feet
-#define STATE_ROWS   32      // FOOT_ROWS + SLOT_COUNT
+#define SLOT_COUNT   23      // ripple queue rows 8 .. 30
+#define MASK_ROW     31      // foot latch: bit mask, one bit per slot
+#define STATE_ROWS   32
 
 // trigger spacing (seconds)
 #define TRIG_HOLD    0.50    // same foot: min time between two of its own ripples
@@ -215,14 +216,11 @@ BUF_OUT Buffer_VS(float4 Pos : POSITION, float2 Tex : TEXCOORD0)
     return Out;
 }
 
-// queue rows: push new ripples, shift old ones
-// foot rows : contact latch, last spawn time
-//
-// ver 1.6: every marker / state read in this shader uses a compile time
-// constant coordinate inside a fully unrolled loop.  Reading the same textures
-// from inside dynamic flow control (the old shape) returned the wrong texel on
-// this machine: the foot rows lost their latch while a motion played back, and
-// the whole trigger changed behaviour whenever unrelated code was touched.
+// Rows 8 .. 30 : ripple queue
+// Row  31      : foot latch - one bit per slot, set while that slot touches the
+//                floor.  ver 1.7 moved it here: rows 0..7 were never written on
+//                this machine (the queue area provably is), which is why the
+//                foot state always read back as zero.
 float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
 {
     int idx = (int)floor(Tex.y * STATE_ROWS);
@@ -231,56 +229,49 @@ float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
     float freq = (1.0 + CtrlFreqM * 2.0) / (1.0 + CtrlFreqP * 2.0);
     float gap  = TRIG_GAP * freq;
 
-    // newest ripple of the last frame (constant coordinate)
-    float4 nrip    = StateRow(FOOT_ROWS);
+    float4 nrip     = StateRow(FOOT_ROWS);          // newest ripple (row 8)
     bool   canSpawn = (CurTime - PastTime(nrip.z) > gap);
+    float  prevMask = StateRow(MASK_ROW).x;
 
-    // ---- evaluate all 8 slots, constant coordinates only
+    float  mask     = 0.0;
     bool   winFound = false;
     int    winIdx   = -1;
     float2 winPos   = float2(0.0, 0.0);
 
-    bool   myOn     = false;
-    float2 myPos    = float2(0.0, 0.0);
-    float4 myPrev   = float4(0.0, 0.0, 0.0, 0.0);
-
     [unroll]
     for (int f = 0; f < FOOT_ROWS; ++f)
     {
-        float4 m    = MarkerAt(f);
-        float4 prev = StateRow(f);
+        float4 m  = MarkerAt(f);
+        bool   on = m.w > 0.5;
 
-        bool on    = m.w > 0.5;
-        bool wasOn = prev.x > 0.5;
-        bool known = prev.y > 0.0;
-        bool hold  = !known || (CurTime - PastTime(prev.y) > TRIG_HOLD);
+        float  w      = pow(2.0, (float)f);
+        bool   prevOn = (fmod(floor(prevMask / w), 2.0) > 0.5);
 
-        // the only trigger: a real touchdown
-        bool fire  = on && !wasOn && hold && canSpawn && !winFound;
+        if (on) mask += w;
 
+        // the only trigger: this slot touches the floor, and it did not last frame
+        bool fire = on && !prevOn && canSpawn && !winFound;
         if (fire)
         {
             winFound = true;
             winIdx   = f;
             winPos   = m.xy;
         }
-
-        if (f == idx)
-        {
-            myOn   = on;
-            myPos  = on ? m.xy : float2(prev.z, 0.0);
-            myPrev = prev;
-        }
     }
 
-    // ---- foot slot rows
+    // ---- foot latch row
+    if (idx == MASK_ROW)
+    {
+        return float4(mask, 0.0, 0.0, 0.0);
+    }
+
+    // ---- rows 0..7: unused
     if (idx < FOOT_ROWS)
     {
-        float lastT = (idx == winIdx) ? CurTime : myPrev.y;
-        return float4(myOn ? 1.0 : 0.0, lastT, myPos.x, myOn ? 1.0 : 0.0);
+        return float4(0.0, 0.0, 0.0, 0.0);
     }
 
-    // ---- ripple queue rows
+    // ---- ripple queue
     int    q     = idx - FOOT_ROWS;
     int    shift = winFound ? 1 : 0;
     float4 color = float4(0.0, 0.0, 0.0, 0.0);
@@ -293,10 +284,10 @@ float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
     }
     else if (shift <= q)
     {
-        float4 p = StateRow(FOOT_ROWS + q - shift);
-        if (p.w > 0.5 && p.z <= CurTime && CurTime - p.z <= RIP_MAX)
+        float4 pc = StateRow(FOOT_ROWS + q - shift);
+        if (pc.w > 0.5 && pc.z <= CurTime && CurTime - pc.z <= RIP_MAX)
         {
-            color = p;
+            color = pc;
         }
     }
 
@@ -386,43 +377,42 @@ float3 RgbToHsv(float3 c)
 
 // ---------------------------------------------------------------- debug overlay
 #if DEBUG_HUD
-// DIAGNOSTIC overlay (v1.4-diag).  Colours never overwrite each other.
-//
-//   band A (z -10.0 .. -9.0) : 8 foot slots, drawn from (on, wasOn)
-//       GREEN  = on now AND on last frame    -> steady, no edge
-//       YELLOW = on now, NOT on last frame   -> touchdown edge (the suspect)
-//       CYAN   = not on now, was on last frame -> the lift frame
+// DIAGNOSTIC overlay.  Colours never overwrite each other.
+//   band A (z -10.0 .. -9.0) : 8 foot slots, from (on now, on last frame)
+//       GREEN  = on now AND last frame   -> steady
+//       YELLOW = on now, not last frame  -> touchdown edge
+//       CYAN   = not now, was last frame -> the lift frame
 //       BLACK  = neither
-//   band B (z -9.0 .. -8.0) : 24 ripple queue slots, colour = age
-//       WHITE < 1s, YELLOW < 3s, RED < 5s, BLACK = empty/expired
-//   band D (z -8.0 .. -7.0) : foot row .w = did the UPDATE pass see the marker?
-//       GREEN = yes, BLACK = no   (compare with band A of the same slot)
-//   band C (z -6.7 .. -6.1) : purple bar = this build is really compiled
+//   band B (z -9.0 .. -8.0) : ripple queue slots, colour = age
+//       WHITE < 1s, YELLOW < 3s, RED < 5s, BLACK = empty
+//   band C (z -8.4 .. -7.8) : purple bar = this build is compiled
 float3 HudDiag(float2 l)
 {
     float3 c = float3(0.0, 0.0, 0.0);
+    float  pm = StateRow(MASK_ROW).x;
 
-    // ---- band A: foot slots
-    [loop]
+    // ---- band A
+    [unroll]
     for (int f = 0; f < FOOT_ROWS; ++f)
     {
-        float4 m    = MarkerAt(f);
-        float4 prev = StateRow(f);
-        bool   on    = m.w > 0.5;
-        bool   wasOn = prev.x > 0.5;
+        float4 m  = MarkerAt(f);
+        bool   on = m.w > 0.5;
+
+        float  w      = pow(2.0, (float)f);
+        bool   prevOn = (fmod(floor(pm / w), 2.0) > 0.5);
 
         float2 c0 = float2(-10.0 + (float)f * 2.5, -10.0);
         float2 d  = abs(l - (c0 + float2(1.0, 0.5))) - float2(1.0, 0.5);
         float  mm = 1.0 - smoothstep(-0.05, 0.05, max(d.x, d.y));
 
         float3 col = float3(0.05, 0.05, 0.05);
-        if ( wasOn &&  on) col = float3(0.15, 1.00, 0.30);   // steady
-        if (!wasOn &&  on) col = float3(1.00, 0.90, 0.10);   // EDGE
-        if ( wasOn && !on) col = float3(0.10, 0.60, 1.00);   // lift
+        if ( prevOn &&  on) col = float3(0.15, 1.00, 0.30);
+        if (!prevOn &&  on) col = float3(1.00, 0.90, 0.10);
+        if ( prevOn && !on) col = float3(0.10, 0.60, 1.00);
         c = max(c, col * mm);
     }
 
-    // ---- band B: ripple queue
+    // ---- band B
     [loop]
     for (int i = 0; i < SLOT_COUNT; ++i)
     {
@@ -435,28 +425,14 @@ float3 HudDiag(float2 l)
             else if (age < 3.0)                  col = float3(1.00, 0.85, 0.10);
             else if (age < RIP_MAX)              col = float3(1.00, 0.20, 0.10);
         }
-        float2 c0 = float2(-10.0 + (float)i * 0.83, -9.0);
-        float2 d  = abs(l - (c0 + float2(0.38, 0.5))) - float2(0.38, 0.5);
+        float2 c0 = float2(-10.0 + (float)i * 0.87, -9.0);
+        float2 d  = abs(l - (c0 + float2(0.40, 0.5))) - float2(0.40, 0.5);
         float  mm = 1.0 - smoothstep(-0.05, 0.05, max(d.x, d.y));
         c = max(c, col * mm);
     }
 
-    // ---- band D: the value the UPDATE pass stored in the foot row's .w
-    //      (= did the update pass see the marker at all)
-    [loop]
-    for (int d = 0; d < FOOT_ROWS; ++d)
-    {
-        float4 pr = StateRow(d);
-        float3 col = (pr.w > 0.5) ? float3(0.15, 1.00, 0.30)
-                                  : float3(0.05, 0.05, 0.05);
-        float2 c0 = float2(-10.0 + (float)d * 2.5, -8.0);
-        float2 dd = abs(l - (c0 + float2(1.0, 0.5))) - float2(1.0, 0.5);
-        float  mm = 1.0 - smoothstep(-0.05, 0.05, max(dd.x, dd.y));
-        c = max(c, col * mm);
-    }
-
     // ---- band C: build-live bar
-    float2 dbar = float2(abs(l.x) - 10.0, abs(l.y + 6.4) - 0.3);
+    float2 dbar = float2(abs(l.x) - 10.0, abs(l.y + 8.1) - 0.3);
     c += float3(0.30, 0.06, 0.55) * (1.0 - smoothstep(-0.05, 0.05, max(dbar.x, dbar.y)));
 
     return c;
