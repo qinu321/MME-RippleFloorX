@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 //
-//  RippleFloorX.fx   ver 1.2
+//  RippleFloorX.fx   ver 1.3
 //
 //  Floor accessory effect (MikuMikuEffect 0.37 or later).
 //  Foot contacts are reported by RF_FootRipple.fxsub, which is assigned to
@@ -461,7 +461,16 @@ float4 CopyState_PS(float2 Tex : TEXCOORD0) : COLOR0
 }
 
 // ---------------------------------------------------------------- technique
+// The whole script has to run exactly once per frame, and only in the pass
+// where the off-screen foot markers are valid.  1.3 declares MMDPass
+// explicitly and gives the other passes an empty technique: while a motion
+// plays back, MMD re-runs its z-plot / shadow passes every frame, and the
+// update script was being executed there too - with an empty marker buffer.
+// That wrote "not touching" into the foot rows, which the next frame read back
+// as a touchdown.  The HUD could not show it because the displayed pass was
+// the good one.
 technique MainTec <
+    string MMDPass = "object";
     string Script =
         "RenderColorTarget0=StateA;"
         "RenderDepthStencilTarget=StateDepth;"
@@ -503,3 +512,56 @@ technique MainTec <
         PixelShader      = compile ps_3_0 DrawFloor_PS();
     }
 }
+
+technique MainTecSS <
+    string MMDPass = "object_ss";
+    string Script =
+        "RenderColorTarget0=StateA;"
+        "RenderDepthStencilTarget=StateDepth;"
+        "Pass=UpdateState;"
+        "RenderColorTarget0=StateB;"
+        "Pass=CopyState;"
+        "RenderColorTarget0=;"
+        "RenderDepthStencilTarget=;"
+        "Pass=DrawFloor;";
+>
+{
+    pass UpdateState < string Script = "Draw=Buffer;";>
+    {
+        ZENABLE          = FALSE;
+        ZWRITEENABLE     = FALSE;
+        ALPHABLENDENABLE = FALSE;
+        CULLMODE         = NONE;
+        VertexShader     = compile vs_3_0 Buffer_VS();
+        PixelShader      = compile ps_3_0 UpdateState_PS();
+    }
+    pass CopyState < string Script = "Draw=Buffer;";>
+    {
+        ZENABLE          = FALSE;
+        ZWRITEENABLE     = FALSE;
+        ALPHABLENDENABLE = FALSE;
+        CULLMODE         = NONE;
+        VertexShader     = compile vs_3_0 Buffer_VS();
+        PixelShader      = compile ps_3_0 CopyState_PS();
+    }
+    pass DrawFloor
+    {
+        ZENABLE          = TRUE;
+        ZWRITEENABLE     = FALSE;
+        ALPHABLENDENABLE = TRUE;
+        SrcBlend         = ONE;
+        DestBlend        = ONE;
+        CULLMODE         = NONE;
+        VertexShader     = compile vs_3_0 DrawFloor_VS();
+        PixelShader      = compile ps_3_0 DrawFloor_PS();
+    }
+}
+
+// -- other MMD passes -------------------------------------------------------
+// Empty on purpose: the state update is only valid in the pass where the
+// off-screen foot markers exist (see the comment above MainTec).  Declaring
+// these keeps MMD from running the update script in its shadow / z-plot /
+// edge passes while a motion plays back.
+technique ShadowTec < string MMDPass = "shadow"; > { }
+technique EdgeTec   < string MMDPass = "edge";   > { }
+technique ZplotTec  < string MMDPass = "zplot";  > { }

@@ -1,4 +1,4 @@
-RippleFloorX ver 1.2
+RippleFloorX ver 1.3
 ======================================================================
 
 【这一版是什么】
@@ -74,7 +74,7 @@ RippleFloorX ver 1.2
   表情名必须完全一致（ASCII、区分大小写）。
 
 
-【触发规则（1.2）】
+【触发规则（1.3）】
 
   一只脚出涟漪，要同时成立：
 
@@ -83,9 +83,12 @@ RippleFloorX ver 1.2
     3. 这只脚距上次出手超过 TRIG_HOLD（0.50 秒）；
     4. 距最新一笔涟漪超过 TRIG_GAP（0.40 秒）；控制器 Freq± 缩放这一条。
 
-  1.0 还有一条「落点比上次挪过 STEP_R 就算新的一步」，本来是给"状态读不到"
-  当兜底的。HUD 实测证明它是播放中静止时假触发的来源：方块一直绿（没有落地沿）
-  涟漪却持续冒，说明触发走的就是这条。1.2 已删除，所以：
+  1.2 删掉了 1.0 的「落点位移」兜底（它会在播放中静止时持续触发）；
+  1.3 修的是更深的根：地板 .fx 原来只写了一个不带 MMDPass 的 technique，
+  而 MMD 在播放时每帧都会重跑 zplot/shadow 等 pass，那些 pass 里离屏脚位
+  缓冲是空的 → 脚位行被写成"没踩住" → 下一帧就成了假的落地沿。
+  现在按 fxsub 的写法把 technique 分开：object / object_ss 各一份完整脚本，
+  shadow / edge / zplot 给空 technique，状态每帧只更新一次。
 
     静止（含播放中的 idle 摆动） -> 完全不出
     抬脚再踩                      -> 出一次，5 秒后消失
@@ -97,9 +100,9 @@ RippleFloorX ver 1.2
 
 【已知问题 / 限制】
 
-  - 1.2 删掉了「落点位移」这条兜底触发，它就是播放中静止时假触发的来源
-    （HUD 观测：方块一直绿、没有落地沿，涟漪却持续冒）。
-    v1.1 试过的「迟滞踩住 + 滞空时间」反而让 0 帧静止也冒，已回退（tag v1.1-latch）。
+  - 触发只认落地沿。若以后重现「播放中静止仍冒」，先查 technique 的 MMDPass
+    是否被改回省略（省略 = 按 object 处理，会被别的 pass 重复执行）。
+    v1.1 试过的「迟滞踩住 + 滞空时间」让 0 帧静止也冒，已回退（tag v1.1-latch）。
   - 槽位用 VertexCount 当模型 ID。顶点数相同的两个模型会撞槽（同一个模型
     加载两份尤其明显），可能互相覆盖涟漪。
   - 触发依赖材质 0 参与渲染（照抄 XxShadow 的 Subset="0"）。
@@ -132,7 +135,7 @@ RippleFloorX ver 1.2
   本目录已 git 管理：
     git tag v1.0-work     v1.0（落地沿 + 落点位移兜底）
     git tag v1.1-latch    v1.1 实验版（迟滞，已回退）
-    main 当前 = v1.2（只留落地沿，去掉落点位移）；debug/hud 分支 = v1.2 + 脚位方块叠加
+    main 当前 = v1.3（只留落地沿 + technique 按 MMDPass 分离）；debug/hud = 同版 + 脚位方块叠加
     git diff v1.0-work v1.1-latch    看 1.0 → 1.1 到底改了什么
     git checkout v1.1-latch -- RippleFloorX.fx RF_FootRipple.fxsub   取回实验版
     git checkout v1.0-work -- .                                    回到可用版
