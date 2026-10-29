@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 //
-//  RippleFloorX.fx   ver 1.0
+//  RippleFloorX.fx   ver 1.2
 //
 //  Floor accessory effect (MikuMikuEffect 0.37 or later).
 //  Foot contacts are reported by RF_FootRipple.fxsub, which is assigned to
@@ -15,12 +15,13 @@
 //      row  0 ..  7 : foot slots   (contact, last spawn time, x, z)
 //      row  8 .. 31 : ripple queue (x, z, start time, 1 + pattern)
 //
-//  Trigger = the rising edge of a contact: the foot was off the floor in the
-//  previous frame and is on the floor now.  A second rule - "the contact point
-//  moved since this foot last touched the floor" - is merged in with OR, so the
-//  floor also works on a machine where the previous-frame copy cannot be read
-//  back.  The two rules can only add ripples; neither can block the other, so
-//  the floor can never become completely silent while a foot is planted.
+//  Trigger = the rising edge of a contact, and nothing else: the foot was off
+//  the floor in the previous frame and is on the floor now.  1.0 also accepted
+//  "the contact point moved since this foot last touched the floor"; that rule
+//  kept firing while a standing model played back (the stored point and the
+//  live one never agreed), so it is gone.  The HUD proved the point: the foot
+//  slot stays green during that phase, i.e. no edge at all, yet ripples kept
+//  coming.
 //
 //  Idea: WorkingFloorX (HariganeP) for the offscreen hand over,
 //        Innocencer (Mairi-nyu-P) for the 24 slot ripple queue.
@@ -57,11 +58,10 @@ float RippleStrength <
 // trigger spacing (seconds)
 #define TRIG_HOLD    0.50    // same foot: min time between two of its own ripples
 #define TRIG_GAP     0.40    // global: min time since the newest ripple
-#define STEP_R       2.0     // foot moved at least this far (local unit) since its
-                             // last contact -> count it as a new step
+
 
 // debug overlay: 1 = paint the foot / trigger state along the floor edge
-#define DEBUG_HUD    0
+#define DEBUG_HUD    1
 
 // ---------------------------------------------------------------- constants
 float4x4 WorldViewProjMatrix : WORLDVIEWPROJECTION;
@@ -192,13 +192,11 @@ float4 FootState(int f, bool canSpawn)
     // rising edge: off the floor last frame, on the floor now
     bool edge = !wasOn;
 
-    // the contact point moved since the last contact of this foot
-    bool moved = !known || (distance(m.xy, prev.zw) > STEP_R);
-
     // never more than one ripple per TRIG_HOLD from the same foot
     bool hold = !known || (CurTime - prevT > TRIG_HOLD);
 
-    bool fire = on && hold && (edge || moved) && canSpawn;
+    // the only trigger: a real touchdown
+    bool fire = on && edge && hold && canSpawn;
     return float4(on ? 1.0 : 0.0, wasOn ? 1.0 : 0.0, fire ? 1.0 : 0.0, 0.0);
 }
 
@@ -394,6 +392,12 @@ float3 HudColor(float2 l, bool canSpawn)
 
         c = max(c, col * m);
     }
+
+    // always-on marker: a purple bar on the +Z edge (the side facing the
+    // camera).  If this bar is visible, MMD really compiled this debug build.
+    float2 dbar = float2(abs(l.x) - 10.0, abs(l.y - 9.5) - 0.5);
+    float  bar  = 1.0 - smoothstep(-0.05, 0.05, max(dbar.x, dbar.y));
+    c = max(c, float3(0.30, 0.06, 0.55) * bar);
 
     return c;
 }
