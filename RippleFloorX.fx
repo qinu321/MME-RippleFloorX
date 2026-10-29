@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 //
-//  RippleFloorX.fx   ver 1.3
+//  RippleFloorX.fx   ver 1.6
 //
 //  Floor accessory effect (MikuMikuEffect 0.37 or later).
 //  Foot contacts are reported by RF_FootRipple.fxsub, which is assigned to
@@ -216,7 +216,13 @@ BUF_OUT Buffer_VS(float4 Pos : POSITION, float2 Tex : TEXCOORD0)
 }
 
 // queue rows: push new ripples, shift old ones
-// foot rows : remember the contact state and the last spawn time
+// foot rows : contact latch, last spawn time
+//
+// ver 1.6: every marker / state read in this shader uses a compile time
+// constant coordinate inside a fully unrolled loop.  Reading the same textures
+// from inside dynamic flow control (the old shape) returned the wrong texel on
+// this machine: the foot rows lost their latch while a motion played back, and
+// the whole trigger changed behaviour whenever unrelated code was touched.
 float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
 {
     int idx = (int)floor(Tex.y * STATE_ROWS);
@@ -225,43 +231,58 @@ float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
     float freq = (1.0 + CtrlFreqM * 2.0) / (1.0 + CtrlFreqP * 2.0);
     float gap  = TRIG_GAP * freq;
 
-    // newest ripple of the last frame; a time from the future means the
-    // timeline was rewound, so treat it as "long ago"
+    // newest ripple of the last frame (constant coordinate)
     float4 nrip    = StateRow(FOOT_ROWS);
     bool   canSpawn = (CurTime - PastTime(nrip.z) > gap);
 
-    // ---- who starts a ripple this frame (identical in every pixel)
-    int    winIdx = -1;
-    float2 winPos = float2(0.0, 0.0);
+    // ---- evaluate all 8 slots, constant coordinates only
+    bool   winFound = false;
+    int    winIdx   = -1;
+    float2 winPos   = float2(0.0, 0.0);
 
-    [loop]
+    bool   myOn     = false;
+    float2 myPos    = float2(0.0, 0.0);
+    float4 myPrev   = float4(0.0, 0.0, 0.0, 0.0);
+
+    [unroll]
     for (int f = 0; f < FOOT_ROWS; ++f)
     {
-        float4 st = FootState(f, canSpawn && winIdx < 0);
-        if (st.z > 0.5)
+        float4 m    = MarkerAt(f);
+        float4 prev = StateRow(f);
+
+        bool on    = m.w > 0.5;
+        bool wasOn = prev.x > 0.5;
+        bool known = prev.y > 0.0;
+        bool hold  = !known || (CurTime - PastTime(prev.y) > TRIG_HOLD);
+
+        // the only trigger: a real touchdown
+        bool fire  = on && !wasOn && hold && canSpawn && !winFound;
+
+        if (fire)
         {
-            winIdx = f;
-            winPos = MarkerAt(f).xy;
+            winFound = true;
+            winIdx   = f;
+            winPos   = m.xy;
+        }
+
+        if (f == idx)
+        {
+            myOn   = on;
+            myPos  = on ? m.xy : float2(prev.z, 0.0);
+            myPrev = prev;
         }
     }
 
     // ---- foot slot rows
     if (idx < FOOT_ROWS)
     {
-        float4 prev = StateRow(idx);
-        float4 m    = MarkerAt(idx);
-        bool   on   = m.w > 0.5;
-
-        float2 pos   = on ? m.xy : prev.zw;     // keep the last contact point
-        float  lastT = (idx == winIdx) ? CurTime : prev.y;
-
-        // .w = did THIS update pass see the marker?  (diagnostic readout)
-        return float4(on ? 1.0 : 0.0, lastT, pos.x, on ? 1.0 : 0.0);
+        float lastT = (idx == winIdx) ? CurTime : myPrev.y;
+        return float4(myOn ? 1.0 : 0.0, lastT, myPos.x, myOn ? 1.0 : 0.0);
     }
 
     // ---- ripple queue rows
     int    q     = idx - FOOT_ROWS;
-    int    shift = (winIdx >= 0) ? 1 : 0;
+    int    shift = winFound ? 1 : 0;
     float4 color = float4(0.0, 0.0, 0.0, 0.0);
 
     if (shift == 1 && q == 0)
@@ -273,9 +294,6 @@ float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
     else if (shift <= q)
     {
         float4 p = StateRow(FOOT_ROWS + q - shift);
-
-        // expired or from the future: written as a zero row, so a dead entry
-        // can never block the "moved" rule with a stale position
         if (p.w > 0.5 && p.z <= CurTime && CurTime - p.z <= RIP_MAX)
         {
             color = p;
@@ -284,8 +302,6 @@ float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
 
     return color;
 }
-
-// ---------------------------------------------------------------- floor
 struct VS_OUT
 {
     float4 Pos   : POSITION;
