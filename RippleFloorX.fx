@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 //
-//  RippleFloorX.fx   ver 1.7
+//  RippleFloorX.fx   ver 1.8
 //
 //  Floor accessory effect (MikuMikuEffect 0.37 or later).
 //  Foot contacts are reported by RF_FootRipple.fxsub, which is assigned to
@@ -11,7 +11,7 @@
 //      the buffer is cleared every frame, so a blob only exists while that
 //      foot is really on the floor
 //
-//  State texture (1 x 32, RGBA32F, double buffered, B = previous frame)
+//  State texture (1 x 32, RGBA32F); the previous frame is read back through
 //      row  0 ..  7 : foot slots   (contact, last spawn time, x, z)
 //      row  8 .. 31 : ripple queue (x, z, start time, 1 + pattern)
 //
@@ -116,19 +116,14 @@ sampler MarkerSamp = sampler_state
 };
 
 // ------------------------------------------------------- state (1 x 32)
-// StateB always holds a copy of the previous frame, so every read is a plain
-// texture fetch (TEXTUREVALUE turned out to be unreliable in this pass).
+// TEXTUREVALUE (frame-start snapshot), so there is no copy pass any more.
+// ver 1.8: the A/B copy lost the foot latch row on this machine.
 texture StateA : RENDERCOLORTARGET <
     int Width  = 1;
     int Height = 32;
     string Format = "A32B32G32R32F";
 >;
 
-texture StateB : RENDERCOLORTARGET <
-    int Width  = 1;
-    int Height = 32;
-    string Format = "A32B32G32R32F";
->;
 
 texture StateDepth : RENDERDEPTHSTENCILTARGET <
     int Width  = 1;
@@ -145,21 +140,18 @@ sampler StateASamp = sampler_state
     AddressV  = CLAMP;
 };
 
-sampler StateBSamp = sampler_state
-{
-    texture   = <StateB>;
-    MinFilter = NONE;
-    MagFilter = NONE;
-    MipFilter = NONE;
-    AddressU  = CLAMP;
-    AddressV  = CLAMP;
-};
 
 // ---------------------------------------------------------------- helpers
+// previous frame state, read from the frame start snapshot MME keeps in shader
+// constant registers (TEXTUREVALUE).  ver 1.8: the A/B copy pass was dropping
+// the foot latch row on this machine; this is the mechanism Innocencer uses and
+// it needs no second texture at all.
+float4 StatePre[STATE_ROWS] : TEXTUREVALUE < string TextureName = "StateA"; >;
+
 // read row i of the previous frame state
 float4 StateRow(int i)
 {
-    return tex2D(StateBSamp, float2(0.5, (i + 0.5) / STATE_ROWS));
+    return StatePre[i];
 }
 
 // marker blob of one foot slot, centred 4 pixels above the bottom edge
@@ -492,12 +484,6 @@ float4 DrawFloor_PS(VS_OUT IN) : COLOR0
     return float4(c, 1.0);
 }
 
-// copy the fresh state into StateB, so the next frame can read it
-float4 CopyState_PS(float2 Tex : TEXCOORD0) : COLOR0
-{
-    int i = (int)floor(Tex.y * STATE_ROWS);
-    return tex2D(StateASamp, float2(0.5, (i + 0.5) / STATE_ROWS));
-}
 
 // ---------------------------------------------------------------- technique
 // The whole script has to run exactly once per frame, and only in the pass
@@ -514,8 +500,6 @@ technique MainTec <
         "RenderColorTarget0=StateA;"
         "RenderDepthStencilTarget=StateDepth;"
         "Pass=UpdateState;"
-        "RenderColorTarget0=StateB;"
-        "Pass=CopyState;"
         "RenderColorTarget0=;"
         "RenderDepthStencilTarget=;"
         "Pass=DrawFloor;";
@@ -530,15 +514,7 @@ technique MainTec <
         VertexShader     = compile vs_3_0 Buffer_VS();
         PixelShader      = compile ps_3_0 UpdateState_PS();
     }
-    pass CopyState < string Script = "Draw=Buffer;";>
-    {
-        ZENABLE          = FALSE;
-        ZWRITEENABLE     = FALSE;
-        ALPHABLENDENABLE = FALSE;
-        CULLMODE         = NONE;
-        VertexShader     = compile vs_3_0 Buffer_VS();
-        PixelShader      = compile ps_3_0 CopyState_PS();
-    }
+
     pass DrawFloor
     {
         ZENABLE          = TRUE;
@@ -558,8 +534,6 @@ technique MainTecSS <
         "RenderColorTarget0=StateA;"
         "RenderDepthStencilTarget=StateDepth;"
         "Pass=UpdateState;"
-        "RenderColorTarget0=StateB;"
-        "Pass=CopyState;"
         "RenderColorTarget0=;"
         "RenderDepthStencilTarget=;"
         "Pass=DrawFloor;";
@@ -574,15 +548,7 @@ technique MainTecSS <
         VertexShader     = compile vs_3_0 Buffer_VS();
         PixelShader      = compile ps_3_0 UpdateState_PS();
     }
-    pass CopyState < string Script = "Draw=Buffer;";>
-    {
-        ZENABLE          = FALSE;
-        ZWRITEENABLE     = FALSE;
-        ALPHABLENDENABLE = FALSE;
-        CULLMODE         = NONE;
-        VertexShader     = compile vs_3_0 Buffer_VS();
-        PixelShader      = compile ps_3_0 CopyState_PS();
-    }
+
     pass DrawFloor
     {
         ZENABLE          = TRUE;
