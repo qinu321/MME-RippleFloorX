@@ -1,28 +1,26 @@
 ////////////////////////////////////////////////////////////////////////////////
 //
-//  RippleFloorX.fx   ver 1.1
+//  RippleFloorX.fx   ver 1.0
 //
 //  Floor accessory effect (MikuMikuEffect 0.37 or later).
 //  Foot contacts are reported by RF_FootRipple.fxsub, which is assigned to
 //  every PMD / PMX automatically through the DefaultEffect list below.
 //
 //  Marker buffer (offscreen render target, float format)
-//      one 4 x 4 pixel blob per foot slot, rgba = (local x, local z,
-//      sole height / shin length, 1).  The blob exists for every foot of a
-//      model that has the bones, not only while it touches the floor: the
-//      height is what the trigger below needs.
+//      one 4 x 4 pixel blob per foot slot, rgba = (local x, local z, 0, 1)
+//      the buffer is cleared every frame, so a blob only exists while that
+//      foot is really on the floor
 //
 //  State texture (1 x 32, RGBA32F, double buffered, B = previous frame)
-//      row  0 ..  7 : foot slots   (planted, last spawn time, lift-off time, -)
+//      row  0 ..  7 : foot slots   (contact, last spawn time, x, z)
 //      row  8 .. 31 : ripple queue (x, z, start time, 1 + pattern)
 //
-//  Trigger = a footfall that is really a footfall: the foot has to be planted
-//  now, was not planted in the previous frame, and had stayed off the floor
-//  for at least MIN_AIR seconds.  "Planted" is a latched (hysteresis) flag:
-//  it goes on below CONTACT_H and only releases above LIFT_H, so a body sway
-//  that flickers the sole height around the contact limit cannot produce a
-//  ripple.  That flicker was what kept the floor busy while the model stood
-//  still during playback.
+//  Trigger = the rising edge of a contact: the foot was off the floor in the
+//  previous frame and is on the floor now.  A second rule - "the contact point
+//  moved since this foot last touched the floor" - is merged in with OR, so the
+//  floor also works on a machine where the previous-frame copy cannot be read
+//  back.  The two rules can only add ripples; neither can block the other, so
+//  the floor can never become completely silent while a foot is planted.
 //
 //  Idea: WorkingFloorX (HariganeP) for the offscreen hand over,
 //        Innocencer (Mairi-nyu-P) for the 24 slot ripple queue.
@@ -59,13 +57,8 @@ float RippleStrength <
 // trigger spacing (seconds)
 #define TRIG_HOLD    0.50    // same foot: min time between two of its own ripples
 #define TRIG_GAP     0.40    // global: min time since the newest ripple
-
-// contact latch (sole height / shin length, 0 = on the floor)
-#define CONTACT_H    0.20    // below this the foot counts as planted
-#define LIFT_H       0.35    // it has to rise above this before a new touchdown
-                             // counts; the gap between the two is what filters
-                             // the contact flicker of a standing model
-#define MIN_AIR      0.10    // and it has to stay up this long (sec)
+#define STEP_R       2.0     // foot moved at least this far (local unit) since its
+                             // last contact -> count it as a new step
 
 // debug overlay: 1 = paint the foot / trigger state along the floor edge
 #define DEBUG_HUD    0
@@ -183,52 +176,30 @@ float PastTime(float t)
 
 // per-foot trigger test.  Every pixel of the update pass evaluates this the
 // same way, so the foot rows and the queue rows always agree on who fires.
-//   .x = planted now (latched, see CONTACT_H / LIFT_H)
-//   .y = planted in the previous frame
+//   .x = on the floor now
+//   .y = on the floor in the previous frame
 //   .z = this foot starts a new ripple in this frame
-//   .w = this slot has foot data at all
 float4 FootState(int f, bool canSpawn)
 {
     float4 m    = MarkerAt(f);
     float4 prev = StateRow(f);
 
-    bool  exists     = m.w > 0.5;
-    float hn         = exists ? m.z : 1.0e9;        // sole height / shin length
-    bool  wasPlanted = prev.x > 0.5;
+    bool  on    = m.w > 0.5;
+    bool  wasOn = prev.x > 0.5;
+    bool  known = prev.y > 0.0;                 // has this foot seen a contact before
+    float prevT = PastTime(prev.y);
 
-    // latch: keep it planted until the foot clearly lifts
-    bool  planted = wasPlanted ? (hn < LIFT_H) : (hn < CONTACT_H);
+    // rising edge: off the floor last frame, on the floor now
+    bool edge = !wasOn;
 
-    // when did it leave the floor
-    float airStart = (wasPlanted && !planted) ? CurTime : prev.z;
-    bool  airOK    = (CurTime - PastTime(airStart) > MIN_AIR);
+    // the contact point moved since the last contact of this foot
+    bool moved = !known || (distance(m.xy, prev.zw) > STEP_R);
 
     // never more than one ripple per TRIG_HOLD from the same foot
-    bool  known = prev.y > 0.0;
-    bool  hold  = !known || (CurTime - PastTime(prev.y) > TRIG_HOLD);
+    bool hold = !known || (CurTime - prevT > TRIG_HOLD);
 
-    bool footfall = planted && !wasPlanted && airOK;
-    bool fire     = footfall && hold && canSpawn;
-
-    return float4(planted ? 1.0 : 0.0, wasPlanted ? 1.0 : 0.0,
-                  fire ? 1.0 : 0.0, exists ? 1.0 : 0.0);
-}
-
-// new content of one foot row for this frame (must match FootState above)
-float4 FootRowNew(int f, int winIdx)
-{
-    float4 m    = MarkerAt(f);
-    float4 prev = StateRow(f);
-
-    bool  exists     = m.w > 0.5;
-    float hn         = exists ? m.z : 1.0e9;
-    bool  wasPlanted = prev.x > 0.5;
-
-    bool  planted  = wasPlanted ? (hn < LIFT_H) : (hn < CONTACT_H);
-    float airStart = (wasPlanted && !planted) ? CurTime : prev.z;
-    float lastT    = (f == winIdx) ? CurTime : prev.y;
-
-    return float4(planted ? 1.0 : 0.0, lastT, airStart, 0.0);
+    bool fire = on && hold && (edge || moved) && canSpawn;
+    return float4(on ? 1.0 : 0.0, wasOn ? 1.0 : 0.0, fire ? 1.0 : 0.0, 0.0);
 }
 
 // ---------------------------------------------------------------- buffer
@@ -279,7 +250,14 @@ float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
     // ---- foot slot rows
     if (idx < FOOT_ROWS)
     {
-        return FootRowNew(idx, winIdx);
+        float4 prev = StateRow(idx);
+        float4 m    = MarkerAt(idx);
+        bool   on   = m.w > 0.5;
+
+        float2 pos   = on ? m.xy : prev.zw;     // keep the last contact point
+        float  lastT = (idx == winIdx) ? CurTime : prev.y;
+
+        return float4(on ? 1.0 : 0.0, lastT, pos.x, pos.y);
     }
 
     // ---- ripple queue rows
@@ -410,7 +388,6 @@ float3 HudColor(float2 l, bool canSpawn)
         float  m  = 1.0 - smoothstep(-0.05, 0.05, max(d.x, d.y));
 
         float3 col = float3(0.04, 0.04, 0.04);
-        if (st.w < 0.5) col = float3(0.25, 0.03, 0.03);     // no foot data at all
         if (st.y > 0.5) col = float3(0.10, 0.30, 1.00);
         if (st.x > 0.5) col = float3(0.15, 1.00, 0.30);
         if (st.z > 0.5) col = float3(1.00, 0.20, 0.90);
