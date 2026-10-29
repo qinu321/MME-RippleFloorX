@@ -61,7 +61,7 @@ float RippleStrength <
 
 
 // debug overlay: 1 = paint the foot / trigger state along the floor edge
-#define DEBUG_HUD    1
+#define DEBUG_HUD    0
 
 // ---------------------------------------------------------------- constants
 float4x4 WorldViewProjMatrix : WORLDVIEWPROJECTION;
@@ -393,11 +393,6 @@ float3 HudColor(float2 l, bool canSpawn)
         c = max(c, col * m);
     }
 
-    // always-on marker: a purple bar on the +Z edge (the side facing the
-    // camera).  If this bar is visible, MMD really compiled this debug build.
-    float2 dbar = float2(abs(l.x) - 10.0, abs(l.y - 9.5) - 0.5);
-    float  bar  = 1.0 - smoothstep(-0.05, 0.05, max(dbar.x, dbar.y));
-    c = max(c, float3(0.30, 0.06, 0.55) * bar);
 
     return c;
 }
