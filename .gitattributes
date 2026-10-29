@@ -1,0 +1,2 @@
+# .fx / .fxsub 是 Shift-JIS(CP932) + LF 的文件，绝不能让 git 动换行
+* -text

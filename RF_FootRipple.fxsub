@@ -1,0 +1,212 @@
+////////////////////////////////////////////////////////////////////////////////
+//
+//  RF_FootRipple.fxsub   ver 1.1
+//
+//  Per model foot contact reporter for RippleFloorX.fx.
+//
+//  This file does NOT draw ripples.  For every foot of the model it writes a
+//  small marker blob into the offscreen buffer declared by RippleFloorX.fx:
+//
+//    slot   : (VertexCount * 2 + side) % 8   (a 4 x 4 px blob, 4 px above the
+//              bottom edge of the buffer, one slot every 1/32 of the width)
+//    colour : (local x, local z, sole height / shin length, 1)
+//
+//  The blob is written whenever the model has these bones - not only while the
+//  foot touches the floor - because RippleFloorX.fx needs the height to decide
+//  when the foot really lifts (contact flicker of a standing model must not be
+//  mistaken for a step).  w = 1 means "this slot carries foot data".
+//
+//  RippleFloorX.fx reads the blobs, keeps the 32 state rows and draws the
+//  rings, so a ripple keeps expanding for 5 seconds after the touch.
+//
+////////////////////////////////////////////////////////////////////////////////
+
+// ---------------------------------------------------------------- tuning
+#define FOOT_THICK    0.22    // ankle height above the sole (x shin length)
+#define FOOT_SLOTS    8
+#define STRIP_SLOTS   32      // marker strip width, 1/32 of the buffer per slot
+
+// ---------------------------------------------------------------- floor
+float4x4 FloorWorld   : CONTROLOBJECT < string name = "(OffscreenOwner)"; >;
+float2   ViewportSize : VIEWPORTPIXELSIZE;
+
+// object vertex count, used as a simple model id for the slot
+int VertexCount;
+
+// ---------------------------------------------------------------- bones
+float3 AnkleR : CONTROLOBJECT < string name = "(self)"; string item = "‰E‘«Žñ"; >;
+float3 AnkleL : CONTROLOBJECT < string name = "(self)"; string item = "¶‘«Žñ"; >;
+float3 KneeR  : CONTROLOBJECT < string name = "(self)"; string item = "‰E‚Ð‚´"; >;
+float3 KneeL  : CONTROLOBJECT < string name = "(self)"; string item = "¶‚Ð‚´"; >;
+float3 ToeR   : CONTROLOBJECT < string name = "(self)"; string item = "‰E‚Â‚Üæ"; >;
+float3 ToeL   : CONTROLOBJECT < string name = "(self)"; string item = "¶‚Â‚Üæ"; >;
+
+////////////////////////////////////////////////////////////////////////////////
+
+float3 FloorOrigin()
+{
+    return float3(FloorWorld._41, FloorWorld._42, FloorWorld._43);
+}
+
+float3 FloorAxisX()
+{
+    return normalize(float3(FloorWorld._11, FloorWorld._12, FloorWorld._13));
+}
+
+float3 FloorAxisY()
+{
+    return normalize(float3(FloorWorld._21, FloorWorld._22, FloorWorld._23));
+}
+
+float3 FloorAxisZ()
+{
+    return normalize(float3(FloorWorld._31, FloorWorld._32, FloorWorld._33));
+}
+
+float ShinLength()
+{
+    float legR = (length(AnkleR) > 0.001 && length(KneeR) > 0.001) ? distance(AnkleR, KneeR) : 0.0;
+    float legL = (length(AnkleL) > 0.001 && length(KneeL) > 0.001) ? distance(AnkleL, KneeL) : 0.0;
+    return clamp(max(legR, legL), 1.0, 100.0);
+}
+
+// sole height of foot k above the floor plane, divided by the shin length.
+// 0 = sole on the floor.  The contact / lift thresholds live in RippleFloorX.fx
+// (CONTACT_H / LIFT_H), so both sides agree on one scale.
+float SoleHeight(int k)
+{
+    float3 ankle = (k == 0) ? AnkleR : AnkleL;
+    float3 toe   = (k == 0) ? ToeR   : ToeL;
+
+    float3 o  = FloorOrigin();
+    float3 ny = FloorAxisY();
+    float  len = ShinLength();
+
+    float h = 1.0e9;
+    if (length(toe)   > 0.001) h = min(h, dot(toe   - o, ny));
+    if (length(ankle) > 0.001) h = min(h, dot(ankle - o, ny) - FOOT_THICK * len);
+
+    return h / len;
+}
+
+// does this foot have usable bones at all (the controller model has not)
+bool FootValid(int k)
+{
+    float3 ankle = (k == 0) ? AnkleR : AnkleL;
+    float3 toe   = (k == 0) ? ToeR   : ToeL;
+    return (length(ankle) > 0.001) || (length(toe) > 0.001);
+}
+
+// contact point of foot k, projected onto the floor plane, in floor local units
+float2 FootLocal(int k)
+{
+    float3 ankle = (k == 0) ? AnkleR : AnkleL;
+    float3 toe   = (k == 0) ? ToeR   : ToeL;
+    float3 a = (length(ankle) > 0.001) ? ankle : toe;
+
+    float3 o  = FloorOrigin();
+    float3 nx = FloorAxisX();
+    float3 ny = FloorAxisY();
+    float3 nz = FloorAxisZ();
+
+    float3 g = a - ny * dot(a - o, ny);
+
+    // world -> floor local units (accessory Si is baked into FloorWorld)
+    float fs = max(length(float3(FloorWorld._11, FloorWorld._12, FloorWorld._13)), 0.0001);
+    return float2(dot(g - o, nx), dot(g - o, nz)) / fs;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+struct VS_OUT
+{
+    float4 Pos   : POSITION;
+    float4 Color : COLOR0;
+};
+
+VS_OUT Marker_VS(float2 Tex : TEXCOORD0, uniform bool IsLeft)
+{
+    VS_OUT Out = (VS_OUT)0;
+
+    int  k = IsLeft ? 1 : 0;
+    bool valid = FootValid(k);
+
+    int slot = (VertexCount * 2 + k) % FOOT_SLOTS;
+
+    // slot centre, 4 px above the bottom edge (RippleFloorX.fx samples there)
+    float u = (slot + 0.5) / STRIP_SLOTS;
+    float v = 1.0 - 4.0 / ViewportSize.y;
+    float2 c = float2(u * 2.0 - 1.0, 1.0 - 2.0 * v);
+
+    // 4 x 4 px blob, collapsed when the model has no such bones
+    float2 s = Tex.xy * 2.0 - 1.0;
+    if (!valid) s = float2(0.0, 0.0);
+
+    float hx = 4.0 / ViewportSize.x;
+    float hy = 4.0 / ViewportSize.y;
+
+    Out.Pos = float4(c.x + s.x * hx, c.y + s.y * hy, 0.0, 1.0);
+
+    // contact point + sole height, straight into the float buffer
+    float2 l = FootLocal(k);
+    Out.Color = float4(l.x, l.y, valid ? SoleHeight(k) : 0.0, valid ? 1.0 : 0.0);
+    return Out;
+}
+
+float4 Marker_PS(VS_OUT IN) : COLOR0
+{
+    return IN.Color;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+technique MainTec < string MMDPass = "object"; string Subset = "0"; >
+{
+    pass MarkerRight < string Script = "Draw=Buffer;";>
+    {
+        ZENABLE          = FALSE;
+        ZWRITEENABLE     = FALSE;
+        ALPHABLENDENABLE = FALSE;
+        CULLMODE         = NONE;
+        VertexShader     = compile vs_3_0 Marker_VS(false);
+        PixelShader      = compile ps_3_0 Marker_PS();
+    }
+    pass MarkerLeft < string Script = "Draw=Buffer;";>
+    {
+        ZENABLE          = FALSE;
+        ZWRITEENABLE     = FALSE;
+        ALPHABLENDENABLE = FALSE;
+        CULLMODE         = NONE;
+        VertexShader     = compile vs_3_0 Marker_VS(true);
+        PixelShader      = compile ps_3_0 Marker_PS();
+    }
+}
+
+technique MainTecSS < string MMDPass = "object_ss"; string Subset = "0"; >
+{
+    pass MarkerRight < string Script = "Draw=Buffer;";>
+    {
+        ZENABLE          = FALSE;
+        ZWRITEENABLE     = FALSE;
+        ALPHABLENDENABLE = FALSE;
+        CULLMODE         = NONE;
+        VertexShader     = compile vs_3_0 Marker_VS(false);
+        PixelShader      = compile ps_3_0 Marker_PS();
+    }
+    pass MarkerLeft < string Script = "Draw=Buffer;";>
+    {
+        ZENABLE          = FALSE;
+        ZWRITEENABLE     = FALSE;
+        ALPHABLENDENABLE = FALSE;
+        CULLMODE         = NONE;
+        VertexShader     = compile vs_3_0 Marker_VS(true);
+        PixelShader      = compile ps_3_0 Marker_PS();
+    }
+}
+
+// suppress every other pass of the model inside the offscreen buffer
+technique MainTecEmpty   < string MMDPass = "object";    > { }
+technique MainTecSSEmpty < string MMDPass = "object_ss"; > { }
+technique EdgeTec        < string MMDPass = "edge";      > { }
+technique ShadowTec      < string MMDPass = "shadow";    > { }
+technique ZplotTec       < string MMDPass = "zplot";     > { }

@@ -1,0 +1,8 @@
+# RippleFloorX —— 本地改动/编译产物，不进版本库
+# （这些 .bak 是逐次实验的手工备份，历史用 git 看就够）
+*.bak
+*.bak2
+*.bak-*
+*.bak2-*
+*.fxo
+*.tmp
