@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 //
-//  RippleFloorX.fx   ver 1.9
+//  RippleFloorX.fx   ver 2.0
 //
 //  Floor accessory effect (MikuMikuEffect 0.37 or later).
 //  Foot contacts are reported by RF_FootRipple.fxsub, which is assigned to
@@ -57,12 +57,11 @@ float RippleStrength <
 #define STATE_ROWS   32
 
 // trigger spacing (seconds)
-#define TRIG_HOLD    0.50    // same foot: min time between two of its own ripples
 #define TRIG_GAP     0.40    // global: min time since the newest ripple
 
 
 // debug overlay: 1 = paint the foot / trigger state along the floor edge
-#define DEBUG_HUD    1
+#define DEBUG_HUD    0
 
 // ---------------------------------------------------------------- constants
 float4x4 WorldViewProjMatrix : WORLDVIEWPROJECTION;
@@ -167,31 +166,6 @@ float PastTime(float t)
     return (t > CurTime) ? -1.0e9 : t;
 }
 
-// per-foot trigger test.  Every pixel of the update pass evaluates this the
-// same way, so the foot rows and the queue rows always agree on who fires.
-//   .x = on the floor now
-//   .y = on the floor in the previous frame
-//   .z = this foot starts a new ripple in this frame
-float4 FootState(int f, bool canSpawn)
-{
-    float4 m    = MarkerAt(f);
-    float4 prev = StateRow(f);
-
-    bool  on    = m.w > 0.5;
-    bool  wasOn = prev.x > 0.5;
-    bool  known = prev.y > 0.0;                 // has this foot seen a contact before
-    float prevT = PastTime(prev.y);
-
-    // rising edge: off the floor last frame, on the floor now
-    bool edge = !wasOn;
-
-    // never more than one ripple per TRIG_HOLD from the same foot
-    bool hold = !known || (CurTime - prevT > TRIG_HOLD);
-
-    // the only trigger: a real touchdown
-    bool fire = on && edge && hold && canSpawn;
-    return float4(on ? 1.0 : 0.0, wasOn ? 1.0 : 0.0, fire ? 1.0 : 0.0, 0.0);
-}
 
 // ---------------------------------------------------------------- buffer
 struct BUF_OUT
