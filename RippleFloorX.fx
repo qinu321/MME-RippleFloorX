@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 //
-//  RippleFloorX.fx   ver 2.6
+//  RippleFloorX.fx   ver 2.7
 //
 //  Floor accessory effect (MikuMikuEffect 0.37 or later).
 //  Foot contacts are reported by RF_FootRipple.fxsub, which is assigned to
@@ -48,7 +48,6 @@ float RippleStrength <
 // ---------------------------------------------------------------- tuning
 #define RIP_MAX      5.0     // ripple life (sec)
 #define RIP_RADIUS   16.0    // ring radius at the end of its life (local unit)
-#define RIP_SPEED    (RIP_RADIUS / RIP_MAX)
 #define RIP_BAND     0.04    // shape band thickness (fraction of the radius)
 #define RIP_LINE_W   0.15    // line pattern half width  (local unit)
 #define RIP_ROT      4.0     // triangle / square rotation (rad / sec)
@@ -94,6 +93,28 @@ float CtrlBrightP : CONTROLOBJECT < string name = CTRL_MODEL; string item = "Bri
 float CtrlBrightM : CONTROLOBJECT < string name = CTRL_MODEL; string item = "Bright-"; >;
 float CtrlFreqP   : CONTROLOBJECT < string name = CTRL_MODEL; string item = "Freq+"; >;
 float CtrlFreqM   : CONTROLOBJECT < string name = CTRL_MODEL; string item = "Freq-"; >;
+float CtrlLifeP   : CONTROLOBJECT < string name = CTRL_MODEL; string item = "Life+"; >;
+float CtrlLifeM   : CONTROLOBJECT < string name = CTRL_MODEL; string item = "Life-"; >;
+float CtrlStepP   : CONTROLOBJECT < string name = CTRL_MODEL; string item = "Step+"; >;
+float CtrlStepM   : CONTROLOBJECT < string name = CTRL_MODEL; string item = "Step-"; >;
+
+// RIP_MAX and STEP_R can be scaled by the controller morphs (Life+/- and Step+/-);
+// a missing morph reads 0, so the defaults below are what you get without it.
+float LifeMax()
+{
+    return RIP_MAX * (1.0 + CtrlLifeP * 2.0) / (1.0 + CtrlLifeM * 2.0);
+}
+
+float RipSpeed()
+{
+    return RIP_RADIUS / LifeMax();
+}
+
+float StepLen()
+{
+    return STEP_R * (1.0 + CtrlStepP * 2.0) / (1.0 + CtrlStepM * 2.0);
+}
+
 
 // ------------------------------------------------------- foot contact buffer
 // float format: the marker carries the contact point in floor local units, so
@@ -275,7 +296,7 @@ float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
         bool cool = (CurTime - PastTime(cd[p]) > gap);
 
         bool edge = on && !prevOn;                             // touched down
-        bool slid = on && (distance(m.xy, pp[p]) > STEP_R);     // slid to a new spot
+        bool slid = on && (distance(m.xy, pp[p]) > StepLen());  // slid to a new spot
 
         if ((edge || slid) && cool && !pairFire[p])
         {
@@ -335,7 +356,7 @@ float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
     else
     {
         float4 pc = StateRow(QUEUE_ROW0 + q - shift);
-        if (pc.w > 0.5 && pc.z <= CurTime && CurTime - pc.z <= RIP_MAX)
+        if (pc.w > 0.5 && pc.z <= CurTime && CurTime - pc.z <= LifeMax())
         {
             color = pc;
         }
@@ -363,7 +384,7 @@ VS_OUT DrawFloor_VS(float4 Pos : POSITION)
 float RippleShape(float2 v, float age, float t0, int type, float aa)
 {
     float r     = length(v);
-    float scale = RIP_SPEED * age;
+    float scale = RipSpeed() * age;
     float aaW   = max(aa * 0.75, 1.0e-4);
 
     if (type == 0)
@@ -473,7 +494,7 @@ float3 HudDiag(float2 l)
             float age = CurTime - s.z;
             if      (age >= 0.0 && age < 1.0)    col = float3(1.00, 1.00, 1.00);
             else if (age < 3.0)                  col = float3(1.00, 0.85, 0.10);
-            else if (age < RIP_MAX)              col = float3(1.00, 0.20, 0.10);
+            else if (age < LifeMax())            col = float3(1.00, 0.20, 0.10);
         }
         float2 c0 = float2(-10.0 + (float)i * 0.69, -9.0);
         float2 d  = abs(l - (c0 + float2(0.32, 0.5))) - float2(0.32, 0.5);
@@ -506,16 +527,16 @@ float4 DrawFloor_PS(VS_OUT IN) : COLOR0
         if (s.w > 0.5)
         {
             float age = CurTime - s.z;
-            if (age >= 0.0 && age < RIP_MAX)
+            if (age >= 0.0 && age < LifeMax())
             {
                 float2 v     = l - s.xy;
-                float  rad   = RIP_SPEED * age;
+                float  rad   = RipSpeed() * age;
                 int    type  = (int)(s.w - 0.99);      // pattern stored as 1 + type
                 float  shape = RippleShape(v, age, s.z, type, pxAA);
 
                 // fade in at birth, fade out at the end, weaker when far
                 float att  = (1.0 / (1.0 + rad * 0.22)) * saturate(age / 0.15);
-                float fade = 1.0 - smoothstep(RIP_MAX - 1.5, RIP_MAX, age);
+                float fade = 1.0 - smoothstep(LifeMax() - 1.5, LifeMax(), age);
 
                 acc += shape * att * fade;
             }
