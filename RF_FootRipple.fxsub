@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 //
-//  RF_FootRipple.fxsub   ver 2.1
+//  RF_FootRipple.fxsub   ver 2.2
 //
 //  Per model foot contact reporter for RippleFloorX.fx.
 //
@@ -22,7 +22,7 @@
 #define CONTACT_RATE  0.20    // contact when sole height < rate * shin length
 #define FOOT_THICK    0.22    // ankle height above the sole (x shin length)
 #define FOOT_SLOTS    16
-#define MODEL_BUCKET  32.0    // world X bucket (local unit) used as a model id
+#define MODEL_BUCKET  16.0    // world XZ bucket (local unit) used as a model id
 #define STRIP_SLOTS   32      // marker strip width, 1/32 of the buffer per slot
 
 // ---------------------------------------------------------------- floor
@@ -30,13 +30,17 @@ float4x4 FloorWorld   : CONTROLOBJECT < string name = "(OffscreenOwner)"; >;
 float2   ViewportSize : VIEWPORTPIXELSIZE;
 
 // model id for the slot.  VertexCount / SubsetCount separate different models,
-// and the coarse world X of the centre bone separates several copies of the
+// and the coarse world XZ of the root bone separates several copies of the
 // SAME model (MME has no per-object index, and identical copies share both
 // counts).  If two models still share a slot, change MODEL_BUCKET above so they
 // fall into different buckets, or move them apart by more than one bucket.
 int    VertexCount;
 int    SubsetCount;
-float3 Hip : CONTROLOBJECT < string name = "(self)"; string item = "センター"; >;
+
+// placement anchor.  "全ての親" (the root bone) is the right one: it carries the
+// model placement and is not moved by the dance, unlike センター.
+float3 RootBone : CONTROLOBJECT < string name = "(self)"; string item = "全ての親"; >;
+float3 HipBone  : CONTROLOBJECT < string name = "(self)"; string item = "センター"; >;
 
 // ---------------------------------------------------------------- bones
 float3 AnkleR : CONTROLOBJECT < string name = "(self)"; string item = "右足首"; >;
@@ -127,9 +131,17 @@ VS_OUT Marker_VS(float2 Tex : TEXCOORD0, uniform bool IsLeft)
     bool contact = FootContact(k);
 
     // 16 slots = 8 model pairs; the pair comes from the model id above
-    int posBucket = ((int)floor(Hip.x / MODEL_BUCKET) + 64) % (FOOT_SLOTS / 2);
-    int pairId    = (VertexCount / 8 + SubsetCount + posBucket) % (FOOT_SLOTS / 2);
-    int slot      = pairId * 2 + k;
+    float3 anchor = RootBone;
+    if (dot(anchor, anchor) < 1.0e-6) anchor = HipBone;
+
+    // both horizontal axes: a row along X and a row along Z both give distinct
+    // buckets (Z is weighted by 3 so the two axes do not collapse into one)
+    int bx = (int)floor(anchor.x / MODEL_BUCKET);
+    int bz = (int)floor(anchor.z / MODEL_BUCKET);
+    int posBucket = (bx + 3 * bz + 512) % (FOOT_SLOTS / 2);
+
+    int pairId = (VertexCount / 8 + SubsetCount + posBucket) % (FOOT_SLOTS / 2);
+    int slot   = pairId * 2 + k;
 
     // slot centre, 4 px above the bottom edge (RippleFloorX.fx samples there)
     float u = (slot + 0.5) / STRIP_SLOTS;
