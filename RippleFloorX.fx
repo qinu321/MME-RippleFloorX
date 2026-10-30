@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 //
-//  RippleFloorX.fx   ver 2.3
+//  RippleFloorX.fx   ver 2.4
 //
 //  Floor accessory effect (MikuMikuEffect 0.37 or later).
 //  Foot contacts are reported by RF_FootRipple.fxsub, which is assigned to
@@ -54,12 +54,14 @@ float RippleStrength <
 
 #define SLOT_MAX     16      // foot marker slots to scan (must match fxsub FOOT_SLOTS)
 #define QUEUE_ROW0   8       // first state row used by the ripple queue
-#define SLOT_COUNT   23      // ripple queue rows 8 .. 30
-#define MASK_ROW     31      // foot latch: bit per slot, rows .w
+#define SLOT_COUNT   21      // ripple queue rows 8 .. 28
+#define CD_ROW0      29      // per model pair cooldown: pairs 0..3
+#define CD_ROW1      30      //                           pairs 4..7
+#define MASK_ROW     31      // foot latch: bit per slot, read from .w
 #define STATE_ROWS   32
 
 // trigger spacing (seconds)
-#define TRIG_GAP     0.40    // global: min time since the newest ripple
+#define TRIG_GAP     0.40    // per model: min time between two of its own ripples
 
 
 // debug overlay: 1 = paint the foot / trigger state along the floor edge
@@ -189,6 +191,13 @@ BUF_OUT Buffer_VS(float4 Pos : POSITION, float2 Tex : TEXCOORD0)
 //                floor.  ver 1.7 moved it here: rows 0..7 were never written on
 //                this machine (the queue area provably is), which is why the
 //                foot state always read back as zero.
+// rows 8..28 : ripple queue (21 slots)
+// row 29 / 30: per model pair cooldown - last spawn time of pairs 0..3 / 4..7.
+//              The throttle is per model on purpose: a single global gate made
+//              the models steal each other's ripples, so only one of them ever
+//              looked alive.
+// row 31     : foot latch, one bit per slot.  Read from .w: the .x channel of
+//              this render target reads back as 0 on this machine.
 float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
 {
     int idx = (int)floor(Tex.y * STATE_ROWS);
@@ -197,12 +206,14 @@ float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
     float freq = (1.0 + CtrlFreqM * 2.0) / (1.0 + CtrlFreqP * 2.0);
     float gap  = TRIG_GAP * freq;
 
-    float4 nrip     = StateRow(QUEUE_ROW0);         // newest ripple (row 8)
-    bool   canSpawn = (CurTime - PastTime(nrip.z) > gap);
-    // .w is the channel that provably reads back on this machine (the .x channel
-    // of this render target comes back as 0), so the mask is written to all four
-    // channels and read from .w
     float  prevMask = StateRow(MASK_ROW).w;
+
+    float4 cdA = StateRow(CD_ROW0);                 // pairs 0..3
+    float4 cdB = StateRow(CD_ROW1);                 // pairs 4..7
+
+    float cd[8];
+    cd[0] = cdA.x; cd[1] = cdA.y; cd[2] = cdA.z; cd[3] = cdA.w;
+    cd[4] = cdB.x; cd[5] = cdB.y; cd[6] = cdB.z; cd[7] = cdB.w;
 
     float  mask     = 0.0;
     bool   winFound = false;
@@ -220,14 +231,34 @@ float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
 
         if (on) mask += w;
 
+        // per model gate: only this model's own cooldown counts
+        bool cool = (CurTime - PastTime(cd[f / 2]) > gap);
+
         // the only trigger: this slot touches the floor, and it did not last frame
-        bool fire = on && !prevOn && canSpawn && !winFound;
+        bool fire = on && !prevOn && cool && !winFound;
         if (fire)
         {
             winFound = true;
             winIdx   = f;
             winPos   = m.xy;
         }
+    }
+
+    // ---- per model pair cooldown rows
+    if (idx == CD_ROW0 || idx == CD_ROW1)
+    {
+        int wp = winFound ? (winIdx / 2) : -1;
+        if (wp == 0) cd[0] = CurTime;
+        if (wp == 1) cd[1] = CurTime;
+        if (wp == 2) cd[2] = CurTime;
+        if (wp == 3) cd[3] = CurTime;
+        if (wp == 4) cd[4] = CurTime;
+        if (wp == 5) cd[5] = CurTime;
+        if (wp == 6) cd[6] = CurTime;
+        if (wp == 7) cd[7] = CurTime;
+
+        if (idx == CD_ROW0) return float4(cd[0], cd[1], cd[2], cd[3]);
+        return float4(cd[4], cd[5], cd[6], cd[7]);
     }
 
     // ---- foot latch row
