@@ -79,6 +79,8 @@ RippleFloorX ver 3.6
     combine it with a higher Freq- if you want long AND many.
   * Rot+ / Rot- only show on triangle / square / star (a circle and the radial
     lines look the same when rotated).
+  * Morphs can be keyframed: key Hue+ every 1000 frames, for example, and the
+    pattern colour changes over time.
 
 [ Troubleshooting ]
 
@@ -112,5 +114,8 @@ RippleFloorX ver 3.6
   Height projection (the 0.1 version): ikeno "WF_XxShadow"
 
   Modification and redistribution are free under the original authors' terms.
+  Credits may be left out when using this MME. If you are happy to add them,
+  please write: 針金P, 舞力介入P, ikeno, 大D, 千野
 
 2026-10-30
+DeepSeek-V4.1-Flash-1017 & 千野
