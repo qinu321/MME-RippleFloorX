@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 //
-//  RippleFloorX.fx   ver 2.5
+//  RippleFloorX.fx   ver 2.6
 //
 //  Floor accessory effect (MikuMikuEffect 0.37 or later).
 //  Foot contacts are reported by RF_FootRipple.fxsub, which is assigned to
@@ -55,10 +55,15 @@ float RippleStrength <
 
 #define SLOT_MAX     16      // foot marker slots to scan (must match fxsub FOOT_SLOTS)
 #define QUEUE_ROW0   0       // first state row used by the ripple queue
-#define SLOT_COUNT   29      // ripple queue rows 0 .. 28
-#define CD_ROW0      29      // per model pair cooldown: pairs 0..3
-#define CD_ROW1      30      //                           pairs 4..7
+#define SLOT_COUNT   27      // ripple queue rows 0 .. 26
+#define CD_ROW0      27      // per model pair: last spawn time  (pairs 0..3)
+#define CD_ROW1      28      //                               (pairs 4..7)
+#define POS_ROW0     29      // per model pair: last spawn point(pairs 0..3)
+#define POS_ROW1     30      //                               (pairs 4..7)
 #define MASK_ROW     31      // foot latch: bit per slot, read from .w
+#define STEP_R       2.5     // a foot that slid this far (local unit) since its
+                             // last ripple counts as a new step, so choreography
+                             // that never lifts the foot still leaves ripples
 #define STATE_ROWS   32
 
 // trigger spacing (seconds)
@@ -192,13 +197,33 @@ BUF_OUT Buffer_VS(float4 Pos : POSITION, float2 Tex : TEXCOORD0)
 //                floor.  ver 1.7 moved it here: rows 0..7 were never written on
 //                this machine (the queue area provably is), which is why the
 //                foot state always read back as zero.
-// rows 0..28 : ripple queue (29 slots)
-// row 29 / 30: per model pair cooldown - last spawn time of pairs 0..3 / 4..7.
-//              The throttle is per model on purpose: a single global gate made
-//              the models steal each other's ripples, so only one of them ever
-//              looked alive.
-// row 31     : foot latch, one bit per slot.  Read from .w: the .x channel of
-//              this render target reads back as 0 on this machine.
+// pack a floor local point (x, z) into one float: quarter unit resolution, each
+// axis offset by 64 and clamped to 0..511, then z * 1024 + x.  float32 keeps
+// integers exact up to 2^24 and 1024 is a power of two, so this round trips.
+float EncodePos(float2 p)
+{
+    float x = floor(clamp((p.x + 64.0) * 4.0, 0.0, 511.0));
+    float z = floor(clamp((p.y + 64.0) * 4.0, 0.0, 511.0));
+    return x + 1024.0 * z;
+}
+
+float2 DecodePos(float v)
+{
+    float z = floor(v / 1024.0);
+    float x = v - 1024.0 * z;
+    return float2(x, z) * 0.25 - 64.0;
+}
+
+// rows 0..26  : ripple queue (27 slots)
+// rows 27 / 28: per model pair last spawn time  (pairs 0..3 / 4..7)
+// rows 29 / 30: per model pair last spawn point (pairs 0..3 / 4..7)
+// row  31     : foot latch, one bit per slot.  Read from .w: the .x channel of
+//               this render target reads back as 0 on this machine.
+//
+// A pair starts a ripple when one of its feet either touches down (height edge)
+// or slides away from the point of its own last ripple.  The second rule exists
+// because plenty of choreography never lifts a foot high enough to make an edge.
+// Up to 8 pairs (16 feet) can start one in the same frame.
 float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
 {
     int idx = (int)floor(Tex.y * STATE_ROWS);
@@ -209,17 +234,31 @@ float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
 
     float  prevMask = StateRow(MASK_ROW).w;
 
-    float4 cdA = StateRow(CD_ROW0);                 // pairs 0..3
-    float4 cdB = StateRow(CD_ROW1);                 // pairs 4..7
+    float4 cdA  = StateRow(CD_ROW0);
+    float4 cdB  = StateRow(CD_ROW1);
+    float4 posA = StateRow(POS_ROW0);
+    float4 posB = StateRow(POS_ROW1);
 
-    float cd[8];
+    float  cd[8];
+    float2 pp[8];
     cd[0] = cdA.x; cd[1] = cdA.y; cd[2] = cdA.z; cd[3] = cdA.w;
     cd[4] = cdB.x; cd[5] = cdB.y; cd[6] = cdB.z; cd[7] = cdB.w;
 
-    float  mask     = 0.0;
-    bool   winFound = false;
-    int    winIdx   = -1;
-    float2 winPos   = float2(0.0, 0.0);
+    pp[0] = DecodePos(posA.x); pp[1] = DecodePos(posA.y);
+    pp[2] = DecodePos(posA.z); pp[3] = DecodePos(posA.w);
+    pp[4] = DecodePos(posB.x); pp[5] = DecodePos(posB.y);
+    pp[6] = DecodePos(posB.z); pp[7] = DecodePos(posB.w);
+
+    float  mask = 0.0;
+    bool   pairFire[8];
+    float2 pairPos[8];
+
+    [unroll]
+    for (int i = 0; i < 8; ++i)
+    {
+        pairFire[i] = false;
+        pairPos[i]  = float2(0.0, 0.0);
+    }
 
     [unroll]
     for (int f = 0; f < SLOT_MAX; ++f)
@@ -232,35 +271,36 @@ float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
 
         if (on) mask += w;
 
-        // per model gate: only this model's own cooldown counts
-        bool cool = (CurTime - PastTime(cd[f / 2]) > gap);
+        int  p    = f / 2;
+        bool cool = (CurTime - PastTime(cd[p]) > gap);
 
-        // the only trigger: this slot touches the floor, and it did not last frame
-        bool fire = on && !prevOn && cool && !winFound;
-        if (fire)
+        bool edge = on && !prevOn;                             // touched down
+        bool slid = on && (distance(m.xy, pp[p]) > STEP_R);     // slid to a new spot
+
+        if ((edge || slid) && cool && !pairFire[p])
         {
-            winFound = true;
-            winIdx   = f;
-            winPos   = m.xy;
+            pairFire[p] = true;
+            pairPos[p]  = m.xy;
+            cd[p]       = CurTime;
+            pp[p]       = m.xy;
         }
     }
 
-    // ---- per model pair cooldown rows
-    if (idx == CD_ROW0 || idx == CD_ROW1)
+    // how many pairs start a ripple this frame (0 .. 8)
+    int shift = 0;
+    [unroll]
+    for (int c = 0; c < 8; ++c)
     {
-        int wp = winFound ? (winIdx / 2) : -1;
-        if (wp == 0) cd[0] = CurTime;
-        if (wp == 1) cd[1] = CurTime;
-        if (wp == 2) cd[2] = CurTime;
-        if (wp == 3) cd[3] = CurTime;
-        if (wp == 4) cd[4] = CurTime;
-        if (wp == 5) cd[5] = CurTime;
-        if (wp == 6) cd[6] = CurTime;
-        if (wp == 7) cd[7] = CurTime;
-
-        if (idx == CD_ROW0) return float4(cd[0], cd[1], cd[2], cd[3]);
-        return float4(cd[4], cd[5], cd[6], cd[7]);
+        if (pairFire[c]) shift++;
     }
+
+    // ---- per pair state rows
+    if (idx == CD_ROW0)  return float4(cd[0], cd[1], cd[2], cd[3]);
+    if (idx == CD_ROW1)  return float4(cd[4], cd[5], cd[6], cd[7]);
+    if (idx == POS_ROW0) return float4(EncodePos(pp[0]), EncodePos(pp[1]),
+                                       EncodePos(pp[2]), EncodePos(pp[3]));
+    if (idx == POS_ROW1) return float4(EncodePos(pp[4]), EncodePos(pp[5]),
+                                       EncodePos(pp[6]), EncodePos(pp[7]));
 
     // ---- foot latch row
     if (idx == MASK_ROW)
@@ -268,20 +308,31 @@ float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
         return float4(mask, mask, mask, mask);
     }
 
-
-
     // ---- ripple queue
     int    q     = idx - QUEUE_ROW0;
-    int    shift = winFound ? 1 : 0;
     float4 color = float4(0.0, 0.0, 0.0, 0.0);
 
-    if (shift == 1 && q == 0)
+    if (q < shift)
     {
-        // left / right foot get different patterns
-        int ptype = (int)fmod(floor(CurTime) + (float)(winIdx - (winIdx / 2) * 2), 4.0);
-        color = float4(winPos.x, winPos.y, CurTime, 1.0 + (float)ptype);
+        // this row is one of the new entries: find the q-th firing pair
+        int    rank = 0;
+        int    wp   = 0;
+        float2 wpos = float2(0.0, 0.0);
+
+        [unroll]
+        for (int k = 0; k < 8; ++k)
+        {
+            if (pairFire[k])
+            {
+                if (rank == q) { wp = k; wpos = pairPos[k]; }
+                rank++;
+            }
+        }
+
+        int ptype = (int)fmod(floor(CurTime) + (float)wp, 4.0);
+        color = float4(wpos.x, wpos.y, CurTime, 1.0 + (float)ptype);
     }
-    else if (shift <= q)
+    else
     {
         float4 pc = StateRow(QUEUE_ROW0 + q - shift);
         if (pc.w > 0.5 && pc.z <= CurTime && CurTime - pc.z <= RIP_MAX)
