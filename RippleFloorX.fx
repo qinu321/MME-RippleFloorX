@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 //
-//  RippleFloorX.fx   ver 2.8
+//  RippleFloorX.fx   ver 2.9
 //
 //  Floor accessory effect (MikuMikuEffect 0.37 or later).
 //  Foot contacts are reported by RF_FootRipple.fxsub, which is assigned to
@@ -11,19 +11,31 @@
 //      the buffer is cleared every frame, so a blob only exists while that
 //      foot is really on the floor
 //
-//  State texture (1 x 32, RGBA32F); rows 0..28 queue, 29/30 per-model cooldown,
-//  row 31 foot latch; the
-//  previous frame is read back through
-//      row  0 ..  7 : foot slots   (contact, last spawn time, x, z)
-//      row  8 .. 31 : ripple queue (x, z, start time, 1 + pattern)
+//  State texture (1 x 32, RGBA32F)
+//      rows  0 .. 24 : ripple queue   (x, z, start time, 1 + pattern)
+//      rows 25 .. 27 : per model pair last spawn time,  .rgb = 3 pairs per row
+//      rows 28 .. 30 : per model pair last spawn point, .rgb = 3 pairs per row
+//      row  31       : foot latch, one bit per slot
 //
-//  Trigger = the rising edge of a contact, and nothing else: the foot was off
-//  the floor in the previous frame and is on the floor now.  1.0 also accepted
-//  "the contact point moved since this foot last touched the floor"; that rule
-//  kept firing while a standing model played back (the stored point and the
-//  live one never agreed), so it is gone.  The HUD proved the point: the foot
-//  slot stays green during that phase, i.e. no edge at all, yet ripples kept
-//  coming.
+//  WRITE RULE (learned the hard way on this machine)
+//      a state row whose written alpha is 0 is lost as a whole - every channel
+//      reads back 0, not just alpha.  So every row keeps alpha >= 1, rows 25
+//      .. 30 write 1.0 into .a and their payload into .rgb, and no fourth
+//      value is ever packed into .a.  The old theory "the .x channel is
+//      broken" was wrong: the queue rows always read .x fine, what made them
+//      different was that their alpha (1 + pattern) was never 0.
+//
+//  Trigger = a contact rising edge, or the feet of one model pair sliding away
+//  from the point of their own last ripple (choreography that never lifts a
+//  foot high enough still leaves ripples).  The slide test compares the
+//  midpoint of the feet that are on the floor with the midpoint recorded at
+//  that pair's last ripple; comparing a single foot against a single stored
+//  point made the two feet take turns "sliding" while the model stood still.
+//  It only runs while both feet are down: with one foot in the air the midpoint
+//  collapses onto the standing foot, which also reads as a slide on every lift.
+//  A state row that fails to come back can only cost a ripple, never make one:
+//  a point outside the floor counts as "no record", and the pair then needs a
+//  real edge.
 //
 //  Idea: WorkingFloorX (HariganeP) for the offscreen hand over,
 //        Innocencer (Mairi-nyu-P) for the 24 slot ripple queue.
@@ -54,11 +66,13 @@ float RippleStrength <
 
 #define SLOT_MAX     16      // foot marker slots to scan (must match fxsub FOOT_SLOTS)
 #define QUEUE_ROW0   0       // first state row used by the ripple queue
-#define SLOT_COUNT   27      // ripple queue rows 0 .. 26
-#define CD_ROW0      27      // per model pair: last spawn time  (pairs 0..3)
-#define CD_ROW1      28      //                               (pairs 4..7)
-#define POS_ROW0     29      // per model pair: last spawn point(pairs 0..3)
-#define POS_ROW1     30      //                               (pairs 4..7)
+#define SLOT_COUNT   25      // ripple queue rows 0 .. 24
+#define CD_ROW0      25      // per model pair last spawn time, .rgb = pairs 0, 1, 2
+#define CD_ROW1      26      //                                    pairs 3, 4, 5
+#define CD_ROW2      27      //                                    pairs 6, 7
+#define POS_ROW0     28      // per model pair last spawn point, pairs 0, 1, 2
+#define POS_ROW1     29      //                                    pairs 3, 4, 5
+#define POS_ROW2     30      //                                    pairs 6, 7
 #define MASK_ROW     31      // foot latch: bit per slot, read from .w
 #define STEP_R       1.5     // a foot that slid this far (local unit) since its
                              // last ripple counts as a new step, so choreography
@@ -235,11 +249,28 @@ float2 DecodePos(float v)
     return float2(x, z) * 0.25 - 64.0;
 }
 
-// rows 0..26  : ripple queue (27 slots)
-// rows 27 / 28: per model pair last spawn time  (pairs 0..3 / 4..7)
-// rows 29 / 30: per model pair last spawn point (pairs 0..3 / 4..7)
-// row  31     : foot latch, one bit per slot.  Read from .w: the .x channel of
-//               this render target reads back as 0 on this machine.
+// A row that did not come back (first load, timeline rewind, a dropped write)
+// decodes to the packing default (-64, -64), outside the 20 x 20 floor.
+// Reject it before the slide test: a missing row may cost a ripple, but it
+// must never produce one every frame.
+bool HasPoint(float2 p)
+{
+    return (abs(p.x) <= 40.0) && (abs(p.y) <= 40.0);
+}
+// rows 0..24  : ripple queue (25 slots)
+// rows 25..27 : per model pair last spawn time,  .rgb = pairs 0..2 / 3..5 / 6,7
+// rows 28..30 : per model pair last spawn point, same three-per-row split
+// row  31     : foot latch, one bit per slot.  Read from .w.
+//
+// Rows 25..30 write 1.0 into .a and three payload values into .rgb.  That is
+// not cosmetic: on this machine a render target row whose alpha ends up 0 is
+// dropped completely, so 2.6..2.8 - which packed four pairs per row and let
+// the alpha be "the cooldown of pair 3" or "the packed point of pair 3", i.e.
+// 0 whenever fewer than four models were loaded - never stored the per pair
+// state at all.  Reading it back gave cd = 0 (cooldown never armed) and the
+// point decode(0) = (-64, -64) (slide test always true): one ripple every
+// 0.4 s while the model stood still.  Three scalars per row plus "alpha = 1"
+// is the only layout that has survived readback here.
 //
 // A pair starts a ripple when one of its feet either touches down (height edge)
 // or slides away from the point of its own last ripple.  The second rule exists
@@ -255,20 +286,25 @@ float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
 
     float  prevMask = StateRow(MASK_ROW).w;
 
+    // Rows 25..30: three payload scalars in .rgb, .a is always 1.0.
     float4 cdA  = StateRow(CD_ROW0);
     float4 cdB  = StateRow(CD_ROW1);
+    float4 cdC  = StateRow(CD_ROW2);
     float4 posA = StateRow(POS_ROW0);
     float4 posB = StateRow(POS_ROW1);
+    float4 posC = StateRow(POS_ROW2);
 
     float  cd[8];
     float2 pp[8];
-    cd[0] = cdA.x; cd[1] = cdA.y; cd[2] = cdA.z; cd[3] = cdA.w;
-    cd[4] = cdB.x; cd[5] = cdB.y; cd[6] = cdB.z; cd[7] = cdB.w;
+    cd[0] = cdA.x; cd[1] = cdA.y; cd[2] = cdA.z;
+    cd[3] = cdB.x; cd[4] = cdB.y; cd[5] = cdB.z;
+    cd[6] = cdC.x; cd[7] = cdC.y;
 
     pp[0] = DecodePos(posA.x); pp[1] = DecodePos(posA.y);
-    pp[2] = DecodePos(posA.z); pp[3] = DecodePos(posA.w);
-    pp[4] = DecodePos(posB.x); pp[5] = DecodePos(posB.y);
-    pp[6] = DecodePos(posB.z); pp[7] = DecodePos(posB.w);
+    pp[2] = DecodePos(posA.z);
+    pp[3] = DecodePos(posB.x); pp[4] = DecodePos(posB.y);
+    pp[5] = DecodePos(posB.z);
+    pp[6] = DecodePos(posC.x); pp[7] = DecodePos(posC.y);
 
     // The slide test must not compare one foot of a pair with the other foot's
     // landing point (they are 5..8 units apart, which made the two feet take
@@ -312,14 +348,19 @@ float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
         {
             float2 avg    = sum / (float)cnt;
             bool   cooled = (CurTime - PastTime(cd[p]) > gap);
-            bool   slid   = (distance(avg, pp[p]) > StepLen());
+            // The midpoint only means something while both feet are down: with
+            // one foot in the air the average collapses onto the standing foot,
+            // which looks like a slide on every lift.  One-foot phrases get
+            // their ripples from the landing edge instead.
+            bool   slid   = (cnt > 1) && HasPoint(pp[p]) &&
+                            (distance(avg, pp[p]) > StepLen());
 
             if ((edge || slid) && cooled)
             {
                 pairFire[p] = true;
                 pairPos[p]  = edge ? edgePos : avg;
                 cd[p]       = CurTime;
-                pp[p]       = avg;
+                if (cnt > 1) pp[p] = avg;   // reference is only valid with both feet down
             }
         }
     }
@@ -333,12 +374,15 @@ float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
     }
 
     // ---- per pair state rows
-    if (idx == CD_ROW0)  return float4(cd[0], cd[1], cd[2], cd[3]);
-    if (idx == CD_ROW1)  return float4(cd[4], cd[5], cd[6], cd[7]);
+    if (idx == CD_ROW0)  return float4(cd[0], cd[1], cd[2], 1.0);
+    if (idx == CD_ROW1)  return float4(cd[3], cd[4], cd[5], 1.0);
+    if (idx == CD_ROW2)  return float4(cd[6], cd[7], 0.0, 1.0);
     if (idx == POS_ROW0) return float4(EncodePos(pp[0]), EncodePos(pp[1]),
-                                       EncodePos(pp[2]), EncodePos(pp[3]));
-    if (idx == POS_ROW1) return float4(EncodePos(pp[4]), EncodePos(pp[5]),
-                                       EncodePos(pp[6]), EncodePos(pp[7]));
+                                       EncodePos(pp[2]), 1.0);
+    if (idx == POS_ROW1) return float4(EncodePos(pp[3]), EncodePos(pp[4]),
+                                       EncodePos(pp[5]), 1.0);
+    if (idx == POS_ROW2) return float4(EncodePos(pp[6]), EncodePos(pp[7]),
+                                       0.0, 1.0);
 
     // ---- foot latch row
     if (idx == MASK_ROW)
@@ -523,6 +567,48 @@ float3 HudDiag(float2 l)
     float2 dbar = float2(abs(l.x) - 10.0, abs(l.y + 8.1) - 0.3);
     c += float3(0.30, 0.06, 0.55) * (1.0 - smoothstep(-0.05, 0.05, max(dbar.x, dbar.y)));
 
+    // ---- band D: the per pair state (rows 25..30), one cell per pair.
+    // These rows are the ones that silently read back as zero while their
+    // alpha was 0 (2.6..2.8), so they get a readout of their own:
+    //   magenta = no usable record  (row lost / first load / rewound)
+    //   green   = record present, cooldown expired (may fire)
+    //   blue    = record present, still cooling down
+    {
+        float  gapp = TRIG_GAP * (1.0 + CtrlFreqM * 2.0) / (1.0 + CtrlFreqP * 2.0);
+        float4 cdr0 = StateRow(CD_ROW0);
+        float4 cdr1 = StateRow(CD_ROW1);
+        float4 cdr2 = StateRow(CD_ROW2);
+        float4 pnr0 = StateRow(POS_ROW0);
+        float4 pnr1 = StateRow(POS_ROW1);
+        float4 pnr2 = StateRow(POS_ROW2);
+
+        float  cdv[8];
+        float2 pnt[8];
+        cdv[0] = cdr0.x; cdv[1] = cdr0.y; cdv[2] = cdr0.z;
+        cdv[3] = cdr1.x; cdv[4] = cdr1.y; cdv[5] = cdr1.z;
+        cdv[6] = cdr2.x; cdv[7] = cdr2.y;
+        pnt[0] = DecodePos(pnr0.x); pnt[1] = DecodePos(pnr0.y);
+        pnt[2] = DecodePos(pnr0.z);
+        pnt[3] = DecodePos(pnr1.x); pnt[4] = DecodePos(pnr1.y);
+        pnt[5] = DecodePos(pnr1.z);
+        pnt[6] = DecodePos(pnr2.x); pnt[7] = DecodePos(pnr2.y);
+
+        [unroll]
+        for (int p = 0; p < 8; ++p)
+        {
+            float3 dcol = float3(0.50, 0.00, 0.60);
+            if (HasPoint(pnt[p]))
+            {
+                dcol = (CurTime - PastTime(cdv[p]) > gapp) ? float3(0.15, 1.00, 0.30)
+                                                           : float3(0.10, 0.55, 1.00);
+            }
+            float2 dc0 = float2(-9.0 + (float)p * 2.0, -7.2);
+            float2 dd  = abs(l - (dc0 + float2(0.8, 0.4))) - float2(0.8, 0.4);
+            float  dm  = 1.0 - smoothstep(-0.05, 0.05, max(dd.x, dd.y));
+            c = max(c, dcol * dm);
+        }
+    }
+
     return c;
 }
 #endif
@@ -606,6 +692,8 @@ technique MainTec <
         ZENABLE          = FALSE;
         ZWRITEENABLE     = FALSE;
         ALPHABLENDENABLE = FALSE;
+        ALPHATESTENABLE  = FALSE;   // a row written with alpha 0 is dropped
+        COLORWRITEENABLE = 0xF;     // RGBA: never inherit a masked channel write
         CULLMODE         = NONE;
         VertexShader     = compile vs_3_0 Buffer_VS();
         PixelShader      = compile ps_3_0 UpdateState_PS();
@@ -640,6 +728,8 @@ technique MainTecSS <
         ZENABLE          = FALSE;
         ZWRITEENABLE     = FALSE;
         ALPHABLENDENABLE = FALSE;
+        ALPHATESTENABLE  = FALSE;   // a row written with alpha 0 is dropped
+        COLORWRITEENABLE = 0xF;     // RGBA: never inherit a masked channel write
         CULLMODE         = NONE;
         VertexShader     = compile vs_3_0 Buffer_VS();
         PixelShader      = compile ps_3_0 UpdateState_PS();
