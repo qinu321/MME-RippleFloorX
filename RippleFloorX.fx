@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 //
-//  RippleFloorX.fx   ver 3.5
+//  RippleFloorX.fx   ver 3.6
 //
 //  Floor accessory effect (MikuMikuEffect 0.37 or later).
 //  Foot contacts are reported by RF_FootRipple.fxsub, which is assigned to
@@ -88,6 +88,11 @@ float RippleStrength <
 
 // trigger spacing (seconds)
 #define TRIG_GAP     0.40    // per model: min time between two of its own ripples
+#define FREQ_GAIN_P  2.0     // Freq+ at 1.0 -> gap / 3   = 0.13 s (dense)
+#define FREQ_GAIN_M  12.0    // Freq- at 1.0 -> gap x 13  = 5.20 s (sparse)
+                             // the two sides are deliberately asymmetric: a crowded
+                             // scene (8 models) needs a much longer gap, and 0.13 s is
+                             // already past what the 25 slot queue can hold
 
 
 // debug overlay: 1 = paint the foot / trigger state along the floor edge
@@ -149,6 +154,13 @@ float RipSpeed()
 float StepLen()
 {
     return STEP_R * (1.0 + CtrlStepP * 2.0) / (1.0 + CtrlStepM * 2.0);
+}
+
+// Per model ripple interval.  Both morphs at 0 (or no controller at all) give
+// exactly TRIG_GAP.  Freq+ divides it, Freq- multiplies it.
+float TriggerGap()
+{
+    return TRIG_GAP * (1.0 + CtrlFreqM * FREQ_GAIN_M) / (1.0 + CtrlFreqP * FREQ_GAIN_P);
 }
 
 // Pattern rotation speed.  Both morphs at 0 (or no controller at all) give
@@ -333,9 +345,8 @@ float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
 {
     int idx = (int)floor(Tex.y * STATE_ROWS);
 
-    // controller: Freq+ makes the interval shorter, Freq- longer
-    float freq = (1.0 + CtrlFreqM * 2.0) / (1.0 + CtrlFreqP * 2.0);
-    float gap  = TRIG_GAP * freq;
+    // controller: Freq+ makes the interval shorter, Freq- much longer
+    float gap = TriggerGap();
 
     float  prevMask = StateRow(MASK_ROW).w;
 
@@ -671,7 +682,7 @@ float3 HudDiag(float2 l)
     //   green   = record present, cooldown expired (may fire)
     //   blue    = record present, still cooling down
     {
-        float  gapp = TRIG_GAP * (1.0 + CtrlFreqM * 2.0) / (1.0 + CtrlFreqP * 2.0);
+        float  gapp = TriggerGap();
         float4 cdr0 = StateRow(CD_ROW0);
         float4 cdr1 = StateRow(CD_ROW1);
         float4 cdr2 = StateRow(CD_ROW2);
