@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 //
-//  RippleFloorX.fx   ver 1.8
+//  RippleFloorX.fx   ver 1.9
 //
 //  Floor accessory effect (MikuMikuEffect 0.37 or later).
 //  Foot contacts are reported by RF_FootRipple.fxsub, which is assigned to
@@ -223,7 +223,10 @@ float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
 
     float4 nrip     = StateRow(FOOT_ROWS);          // newest ripple (row 8)
     bool   canSpawn = (CurTime - PastTime(nrip.z) > gap);
-    float  prevMask = StateRow(MASK_ROW).x;
+    // .w is the channel that provably reads back on this machine (the .x channel
+    // of this render target comes back as 0), so the mask is written to all four
+    // channels and read from .w
+    float  prevMask = StateRow(MASK_ROW).w;
 
     float  mask     = 0.0;
     bool   winFound = false;
@@ -254,7 +257,7 @@ float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
     // ---- foot latch row
     if (idx == MASK_ROW)
     {
-        return float4(mask, 0.0, 0.0, 0.0);
+        return float4(mask, mask, mask, mask);
     }
 
     // ---- rows 0..7: unused
@@ -381,7 +384,7 @@ float3 RgbToHsv(float3 c)
 float3 HudDiag(float2 l)
 {
     float3 c = float3(0.0, 0.0, 0.0);
-    float  pm = StateRow(MASK_ROW).x;
+    float  pm = StateRow(MASK_ROW).w;
 
     // ---- band A
     [unroll]
