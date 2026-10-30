@@ -16,6 +16,7 @@ RippleFloorX ver 3.6
   RippleFloorX.fx       地板本体
   RF_FootRipple.fxsub   每个模型的「脚部报告器」（自动挂上，Shift-JIS）
   RippleFloorCtrl.pmx   参数控制器（可选）
+  readme_en.txt / readme_jp.txt   同一份说明的英文 / 日文版
 
   四个文件放同一个文件夹（MME 0.33+ 可用）。
   ★ .fx 与 .fxsub 必须同版，标记格式是两边共用的约定。
@@ -64,6 +65,7 @@ RippleFloorX ver 3.6
   · 多人（5~8 个）时 Freq- 至少 0.25（间隔 1.6 秒），0.4~0.5 更稳。
   · Life+ 拉满会更快塞满队列，最早的环被提前挤掉；想"又长又满"要同时把 Freq- 往疏里调。
   · Rot± 只对三角/方/星可见（圆与放射线转了看不出来）。
+  · 表情支持注册关键帧，如每隔1000帧注册一下Hue+的变化，就可以得到动态变化颜色的图案。
 
 【排查】
 
@@ -92,5 +94,7 @@ RippleFloorX ver 3.6
   高度投影（0.1 那版）：ikeno「WF_XxShadow」
 
   按原作者说明，改造/二次配布自由。
+  使用本MME可以不写Credits，如果乐意加上，请写：針金P、舞力介入P、ikeno、大D、千野
 
 2026-10-30
+DeepSeek-V4.1-Flash-1017 & 千野
