@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 //
-//  RF_FootRipple.fxsub   ver 2.2
+//  RF_FootRipple.fxsub   ver 2.3
 //
 //  Per model foot contact reporter for RippleFloorX.fx.
 //
@@ -22,23 +22,18 @@
 #define CONTACT_RATE  0.20    // contact when sole height < rate * shin length
 #define FOOT_THICK    0.22    // ankle height above the sole (x shin length)
 #define FOOT_SLOTS    16
-#define MODEL_BUCKET  16.0    // world XZ bucket (local unit) used as a model id
+#define CENTER_BUCKET 32.0    // PRIMARY: coarse XZ bucket of センター (carries the placement)
+#define ROOT_BUCKET   8.0     // SECONDARY: fine XZ bucket of 全ての親 (usually 0; only breaks ties)
 #define STRIP_SLOTS   32      // marker strip width, 1/32 of the buffer per slot
 
 // ---------------------------------------------------------------- floor
 float4x4 FloorWorld   : CONTROLOBJECT < string name = "(OffscreenOwner)"; >;
 float2   ViewportSize : VIEWPORTPIXELSIZE;
 
-// model id for the slot.  VertexCount / SubsetCount separate different models,
-// and the coarse world XZ of the root bone separates several copies of the
-// SAME model (MME has no per-object index, and identical copies share both
-// counts).  If two models still share a slot, change MODEL_BUCKET above so they
-// fall into different buckets, or move them apart by more than one bucket.
 int    VertexCount;
 int    SubsetCount;
 
-// placement anchor.  "全ての親" (the root bone) is the right one: it carries the
-// model placement and is not moved by the dance, unlike センター.
+// センター = primary anchor, 全ての親 = secondary (both are bone world positions)
 float3 RootBone : CONTROLOBJECT < string name = "(self)"; string item = "全ての親"; >;
 float3 HipBone  : CONTROLOBJECT < string name = "(self)"; string item = "センター"; >;
 
@@ -130,15 +125,19 @@ VS_OUT Marker_VS(float2 Tex : TEXCOORD0, uniform bool IsLeft)
     int  k = IsLeft ? 1 : 0;
     bool contact = FootContact(k);
 
-    // 16 slots = 8 model pairs; the pair comes from the model id above
-    float3 anchor = RootBone;
-    if (dot(anchor, anchor) < 1.0e-6) anchor = HipBone;
+    // 16 slots = 8 model pairs; the pair is the model id (see the comments above)
+    // primary = センター coarse bucket, secondary = 全ての親 fine bucket.
+    // Both horizontal axes take part (Z weighted 3) so a row along X and a row
+    // along Z both separate.  The root term is 0 while 全ての親 stays at the
+    // origin, so it never disturbs the primary term.
+    //   it only separates two models whose センター land in the same coarse bucket.
+    // Both horizontal axes take part (Z weighted 3), so rows along X and Z separate.
+    int cx = (int)floor(HipBone.x  / CENTER_BUCKET);
+    int cz = (int)floor(HipBone.z  / CENTER_BUCKET);
+    int rx = (int)floor(RootBone.x / ROOT_BUCKET);
+    int rz = (int)floor(RootBone.z / ROOT_BUCKET);
 
-    // both horizontal axes: a row along X and a row along Z both give distinct
-    // buckets (Z is weighted by 3 so the two axes do not collapse into one)
-    int bx = (int)floor(anchor.x / MODEL_BUCKET);
-    int bz = (int)floor(anchor.z / MODEL_BUCKET);
-    int posBucket = (bx + 3 * bz + 512) % (FOOT_SLOTS / 2);
+    int posBucket = (cx + 3 * cz + rx + 3 * rz + 512) % (FOOT_SLOTS / 2);
 
     int pairId = (VertexCount / 8 + SubsetCount + posBucket) % (FOOT_SLOTS / 2);
     int slot   = pairId * 2 + k;
