@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 //
-//  RippleFloorX.fx   ver 2.4
+//  RippleFloorX.fx   ver 2.5
 //
 //  Floor accessory effect (MikuMikuEffect 0.37 or later).
 //  Foot contacts are reported by RF_FootRipple.fxsub, which is assigned to
@@ -11,7 +11,8 @@
 //      the buffer is cleared every frame, so a blob only exists while that
 //      foot is really on the floor
 //
-//  State texture (1 x 32, RGBA32F); rows 8..30 queue, row 31 foot latch; the
+//  State texture (1 x 32, RGBA32F); rows 0..28 queue, 29/30 per-model cooldown,
+//  row 31 foot latch; the
 //  previous frame is read back through
 //      row  0 ..  7 : foot slots   (contact, last spawn time, x, z)
 //      row  8 .. 31 : ripple queue (x, z, start time, 1 + pattern)
@@ -53,8 +54,8 @@ float RippleStrength <
 #define RIP_ROT      4.0     // triangle / square rotation (rad / sec)
 
 #define SLOT_MAX     16      // foot marker slots to scan (must match fxsub FOOT_SLOTS)
-#define QUEUE_ROW0   8       // first state row used by the ripple queue
-#define SLOT_COUNT   21      // ripple queue rows 8 .. 28
+#define QUEUE_ROW0   0       // first state row used by the ripple queue
+#define SLOT_COUNT   29      // ripple queue rows 0 .. 28
 #define CD_ROW0      29      // per model pair cooldown: pairs 0..3
 #define CD_ROW1      30      //                           pairs 4..7
 #define MASK_ROW     31      // foot latch: bit per slot, read from .w
@@ -191,7 +192,7 @@ BUF_OUT Buffer_VS(float4 Pos : POSITION, float2 Tex : TEXCOORD0)
 //                floor.  ver 1.7 moved it here: rows 0..7 were never written on
 //                this machine (the queue area provably is), which is why the
 //                foot state always read back as zero.
-// rows 8..28 : ripple queue (21 slots)
+// rows 0..28 : ripple queue (29 slots)
 // row 29 / 30: per model pair cooldown - last spawn time of pairs 0..3 / 4..7.
 //              The throttle is per model on purpose: a single global gate made
 //              the models steal each other's ripples, so only one of them ever
@@ -267,11 +268,7 @@ float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
         return float4(mask, mask, mask, mask);
     }
 
-    // ---- rows 0..7: unused
-    if (idx < QUEUE_ROW0)
-    {
-        return float4(0.0, 0.0, 0.0, 0.0);
-    }
+
 
     // ---- ripple queue
     int    q     = idx - QUEUE_ROW0;
@@ -385,7 +382,7 @@ float3 RgbToHsv(float3 c)
 //       YELLOW = on now, not last frame  -> touchdown edge
 //       CYAN   = not now, was last frame -> the lift frame
 //       BLACK  = neither
-//   band B (z -9.0 .. -8.0) : ripple queue slots, colour = age
+//   band B (z -9.0 .. -8.0) : 29 ripple queue slots, colour = age
 //       WHITE < 1s, YELLOW < 3s, RED < 5s, BLACK = empty
 //   band C (z -8.4 .. -7.8) : purple bar = this build is compiled
 float3 HudDiag(float2 l)
@@ -427,8 +424,8 @@ float3 HudDiag(float2 l)
             else if (age < 3.0)                  col = float3(1.00, 0.85, 0.10);
             else if (age < RIP_MAX)              col = float3(1.00, 0.20, 0.10);
         }
-        float2 c0 = float2(-10.0 + (float)i * 0.87, -9.0);
-        float2 d  = abs(l - (c0 + float2(0.40, 0.5))) - float2(0.40, 0.5);
+        float2 c0 = float2(-10.0 + (float)i * 0.69, -9.0);
+        float2 d  = abs(l - (c0 + float2(0.32, 0.5))) - float2(0.32, 0.5);
         float  mm = 1.0 - smoothstep(-0.05, 0.05, max(d.x, d.y));
         c = max(c, col * mm);
     }
