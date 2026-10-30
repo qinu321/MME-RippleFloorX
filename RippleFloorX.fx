@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 //
-//  RippleFloorX.fx   ver 3.4
+//  RippleFloorX.fx   ver 3.5
 //
 //  Floor accessory effect (MikuMikuEffect 0.37 or later).
 //  Foot contacts are reported by RF_FootRipple.fxsub, which is assigned to
@@ -67,6 +67,9 @@ float RippleStrength <
 #define SIZE_GAIN    1.5     // Sz+ at 1.0 -> x2.5, Sz- at 1.0 -> /2.5 (0 = default)
 #define JITTER_AMP   0.25    // Jitter at 1.0 -> every ripple gets +-25 % size
 #define STAR_BAND_MUL 1.25   // the star reads lighter than a square at equal width
+#define ROT_GAIN     1.5     // Rot+ at 1.0 -> 10 rad/s, Rot- -> 1.6 rad/s (0 = RIP_ROT)
+                             // the range stops at x2.5 on purpose: MMD runs at 30 fps and
+                             // past ~10 rad/s a 5 point star starts to strobe
 
 #define SLOT_MAX     16      // foot marker slots to scan (must match fxsub FOOT_SLOTS)
 #define QUEUE_ROW0   0       // first state row used by the ripple queue
@@ -128,6 +131,8 @@ float CtrlStarSzM  : CONTROLOBJECT < string name = CTRL_MODEL; string item = "St
 float CtrlLineSzP  : CONTROLOBJECT < string name = CTRL_MODEL; string item = "LineSz+"; >;
 float CtrlLineSzM  : CONTROLOBJECT < string name = CTRL_MODEL; string item = "LineSz-"; >;
 float CtrlJitter   : CONTROLOBJECT < string name = CTRL_MODEL; string item = "Jitter"; >;
+float CtrlRotP     : CONTROLOBJECT < string name = CTRL_MODEL; string item = "Rot+"; >;
+float CtrlRotM     : CONTROLOBJECT < string name = CTRL_MODEL; string item = "Rot-"; >;
 
 // RIP_MAX and STEP_R can be scaled by the controller morphs (Life+/- and Step+/-);
 // a missing morph reads 0, so the defaults below are what you get without it.
@@ -144,6 +149,13 @@ float RipSpeed()
 float StepLen()
 {
     return STEP_R * (1.0 + CtrlStepP * 2.0) / (1.0 + CtrlStepM * 2.0);
+}
+
+// Pattern rotation speed.  Both morphs at 0 (or no controller at all) give
+// exactly RIP_ROT, i.e. the look the effect has without any of this.
+float RotSpeed()
+{
+    return RIP_ROT * (1.0 + CtrlRotP * ROT_GAIN) / (1.0 + CtrlRotM * ROT_GAIN);
 }
 
 // Per pattern size factor.  Both morphs at 0 (or no controller at all) give
@@ -498,7 +510,7 @@ float RippleShape(float2 v, float age, float t0, int type, float aa, float sizeK
         return 1.0 - smoothstep(width - aaW, width + aaW, abs(wL));
     }
 
-    float rad = atan2(v.y, v.x) + t0 * 13.0 + age * RIP_ROT;
+    float rad = atan2(v.y, v.x) + t0 * 13.0 + age * RotSpeed();
 
     // Every pattern is fitted to the same outer radius.  An n-gon whose
     // apothem is s reaches s / cos(pi / n), so before this the triangle
