@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 //
-//  RippleFloorX.fx   ver 3.1
+//  RippleFloorX.fx   ver 3.2
 //
 //  Floor accessory effect (MikuMikuEffect 0.37 or later).
 //  Foot contacts are reported by RF_FootRipple.fxsub, which is assigned to
@@ -64,14 +64,6 @@ float RippleStrength <
 #define RIP_LINE_W   0.15    // line pattern half width  (local unit)
 #define RIP_ROT      4.0     // pattern rotation (rad / sec)
 #define STAR_INNER   0.45    // five point star: inner radius / outer radius
-#define PETAL_N      5.0     // petal burst: number of petals (5 = flower, 8 = chrysanthemum)
-#define PETAL_INNER  0.30    // petal burst: valley radius / tip radius
-#define BURST_LIFE   1.6     // petal burst: life (sec).  The queue slot is still
-                             // freed by RIP_MAX, so a burst holds its slot longer
-                             // than it is visible - only matters when saturated.
-#define BURST_RADIUS 7.0     // petal burst: outer radius at the end of its life
-#define BURST_SPIN   2.0     // petal burst: extra rotation (rad / sec) on RIP_ROT
-#define BURST_BAND   0.07    // petal burst: band thickness (fraction of the radius)
 
 #define SLOT_MAX     16      // foot marker slots to scan (must match fxsub FOOT_SLOTS)
 #define QUEUE_ROW0   0       // first state row used by the ripple queue
@@ -420,7 +412,7 @@ float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
             }
         }
 
-        int ptype = (int)fmod(floor(CurTime) + (float)wp, 6.0);
+        int ptype = (int)fmod(floor(CurTime) + (float)wp, 5.0);
         color = float4(wpos.x, wpos.y, CurTime, 1.0 + (float)ptype);
     }
     else
@@ -448,9 +440,8 @@ VS_OUT DrawFloor_VS(float4 Pos : POSITION)
     return Out;
 }
 
-// six patterns, cycled by the ripple start time (same idea as Innocencer):
-//   type 0 = rotating lines, 1 = triangle, 2 = square, 3 = circle, 4 = star,
-//   type 5 = petal burst (short lived: BURST_LIFE, its own expansion curve)
+// five patterns, cycled by the ripple start time (same idea as Innocencer):
+//   type 0 = rotating lines, 1 = triangle, 2 = square, 3 = circle, 4 = star
 // aa = local units per screen pixel, used to soften the hard band edges
 float RippleShape(float2 v, float age, float t0, int type, float aa)
 {
@@ -468,26 +459,6 @@ float RippleShape(float2 v, float age, float t0, int type, float aa)
     }
 
     float rad = atan2(v.y, v.x) + t0 * 13.0 + age * RIP_ROT;
-
-    if (type == 5)
-    {
-        // Petal burst: the boundary radius is interpolated ACROSS THE ANGLE, so
-        // the edges bend into petals - the opposite of the star above, where a
-        // straight chord is used on purpose.  It is a short, fast burst (a
-        // firework, not a five second ring): ease-out expansion, its own fade,
-        // and a flash at the centre drawn by DrawFloor_PS.
-        float tB  = saturate(age / BURST_LIFE);
-        float rB  = BURST_RADIUS * pow(tB, 0.55);
-        float hiB = rB + max(0.12, rB * BURST_BAND);
-        float mB  = radians(180.0 / PETAL_N);
-        float rbB = PETAL_INNER + (1.0 - PETAL_INNER) *
-                    abs(fmod(abs(rad + age * BURST_SPIN), mB) / mB - 1.0);
-        float wB  = r / rbB;
-
-        return smoothstep(rB - aaW, rB + aaW, wB) *
-               (1.0 - smoothstep(hiB - aaW, hiB + aaW, wB)) *
-               (1.0 - smoothstep(0.70, 1.0, tB));
-    }
 
     // Every pattern is fitted to the same outer radius.  An n-gon whose
     // apothem is s reaches s / cos(pi / n), so before this the triangle
@@ -699,13 +670,7 @@ float4 DrawFloor_PS(VS_OUT IN) : COLOR0
                 float att  = (1.0 / (1.0 + rad * 0.22)) * saturate(age / 0.15);
                 float fade = 1.0 - smoothstep(LifeMax() - 1.5, LifeMax(), age);
 
-                // the burst also gets a flash at its centre; it is added after
-                // the fade-in because the flash IS the birth of the burst
-                float flash = (type == 5)
-                    ? exp(-age * 6.5) * (1.0 - saturate(length(v) / 1.6))
-                    : 0.0;
-
-                acc += shape * att * fade + flash;
+                acc += shape * att * fade;
             }
         }
     }
