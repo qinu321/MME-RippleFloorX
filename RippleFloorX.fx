@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 //
-//  RippleFloorX.fx   ver 3.2
+//  RippleFloorX.fx   ver 3.3
 //
 //  Floor accessory effect (MikuMikuEffect 0.37 or later).
 //  Foot contacts are reported by RF_FootRipple.fxsub, which is assigned to
@@ -64,6 +64,8 @@ float RippleStrength <
 #define RIP_LINE_W   0.15    // line pattern half width  (local unit)
 #define RIP_ROT      4.0     // pattern rotation (rad / sec)
 #define STAR_INNER   0.45    // five point star: inner radius / outer radius
+#define SIZE_GAIN    1.5     // Sz+ at 1.0 -> x2.5, Sz- at 1.0 -> /2.5 (0 = default)
+#define JITTER_AMP   0.25    // Jitter at 1.0 -> every ripple gets +-25 % size
 
 #define SLOT_MAX     16      // foot marker slots to scan (must match fxsub FOOT_SLOTS)
 #define QUEUE_ROW0   0       // first state row used by the ripple queue
@@ -113,6 +115,19 @@ float CtrlLifeM   : CONTROLOBJECT < string name = CTRL_MODEL; string item = "Lif
 float CtrlStepP   : CONTROLOBJECT < string name = CTRL_MODEL; string item = "Step+"; >;
 float CtrlStepM   : CONTROLOBJECT < string name = CTRL_MODEL; string item = "Step-"; >;
 
+// per pattern size (0 = default, + grows, - shrinks) and a per ripple jitter
+float CtrlTriSzP   : CONTROLOBJECT < string name = CTRL_MODEL; string item = "TriSz+"; >;
+float CtrlTriSzM   : CONTROLOBJECT < string name = CTRL_MODEL; string item = "TriSz-"; >;
+float CtrlSqrSzP   : CONTROLOBJECT < string name = CTRL_MODEL; string item = "SqrSz+"; >;
+float CtrlSqrSzM   : CONTROLOBJECT < string name = CTRL_MODEL; string item = "SqrSz-"; >;
+float CtrlCirSzP   : CONTROLOBJECT < string name = CTRL_MODEL; string item = "CirSz+"; >;
+float CtrlCirSzM   : CONTROLOBJECT < string name = CTRL_MODEL; string item = "CirSz-"; >;
+float CtrlStarSzP  : CONTROLOBJECT < string name = CTRL_MODEL; string item = "StarSz+"; >;
+float CtrlStarSzM  : CONTROLOBJECT < string name = CTRL_MODEL; string item = "StarSz-"; >;
+float CtrlLineSzP  : CONTROLOBJECT < string name = CTRL_MODEL; string item = "LineSz+"; >;
+float CtrlLineSzM  : CONTROLOBJECT < string name = CTRL_MODEL; string item = "LineSz-"; >;
+float CtrlJitter   : CONTROLOBJECT < string name = CTRL_MODEL; string item = "Jitter"; >;
+
 // RIP_MAX and STEP_R can be scaled by the controller morphs (Life+/- and Step+/-);
 // a missing morph reads 0, so the defaults below are what you get without it.
 float LifeMax()
@@ -128,6 +143,30 @@ float RipSpeed()
 float StepLen()
 {
     return STEP_R * (1.0 + CtrlStepP * 2.0) / (1.0 + CtrlStepM * 2.0);
+}
+
+// Per pattern size factor.  Both morphs at 0 (or no controller at all) give
+// exactly 1.0 - i.e. the look the effect has without any of this.
+float ShapeSize(int type)
+{
+    float p = 0.0;
+    float m = 0.0;
+
+    if      (type == 0) { p = CtrlLineSzP; m = CtrlLineSzM; }
+    else if (type == 1) { p = CtrlTriSzP;  m = CtrlTriSzM;  }
+    else if (type == 2) { p = CtrlSqrSzP;  m = CtrlSqrSzM;  }
+    else if (type == 3) { p = CtrlCirSzP;  m = CtrlCirSzM;  }
+    else                { p = CtrlStarSzP; m = CtrlStarSzM; }
+
+    return (1.0 + p * SIZE_GAIN) / (1.0 + m * SIZE_GAIN);
+}
+
+// One deterministic factor per ripple: stable for the whole life of that
+// ring and different from ripple to ripple, so consecutive rings never look
+// stamped from the same mould.  0 = off.
+float ShapeJitter(float seed)
+{
+    return 1.0 + CtrlJitter * JITTER_AMP * (frac(seed) * 2.0 - 1.0);
 }
 
 
@@ -443,7 +482,7 @@ VS_OUT DrawFloor_VS(float4 Pos : POSITION)
 // five patterns, cycled by the ripple start time (same idea as Innocencer):
 //   type 0 = rotating lines, 1 = triangle, 2 = square, 3 = circle, 4 = star
 // aa = local units per screen pixel, used to soften the hard band edges
-float RippleShape(float2 v, float age, float t0, int type, float aa)
+float RippleShape(float2 v, float age, float t0, int type, float aa, float sizeK)
 {
     float r     = length(v);
     float scale = RipSpeed() * age;
@@ -454,7 +493,7 @@ float RippleShape(float2 v, float age, float t0, int type, float aa)
         // radial lines, fading out (the original line effect is short lived)
         float radL  = atan2(v.y, v.x) + t0 * 13.0;
         float wL    = r * sin(radL);
-        float width = RIP_LINE_W * (1.0 - saturate(age / 1.5));
+        float width = RIP_LINE_W * sizeK * (1.0 - saturate(age / 1.5));
         return 1.0 - smoothstep(width - aaW, width + aaW, abs(wL));
     }
 
@@ -464,7 +503,7 @@ float RippleShape(float2 v, float age, float t0, int type, float aa)
     // apothem is s reaches s / cos(pi / n), so before this the triangle
     // reached twice as far as the circle and the ring visibly "breathed"
     // whenever the pattern changed.
-    float scl = scale;
+    float scl = scale * sizeK;
     float w;
 
     if (type == 4)
@@ -664,7 +703,11 @@ float4 DrawFloor_PS(VS_OUT IN) : COLOR0
                 float2 v     = l - s.xy;
                 float  rad   = RipSpeed() * age;
                 int    type  = (int)(s.w - 0.99);      // pattern stored as 1 + type
-                float  shape = RippleShape(v, age, s.z, type, pxAA);
+                // the jitter seed mixes the birth time with the landing point,
+                // otherwise ripples that fire in the same frame (multi model
+                // choreography does this a lot) would all get the same size
+                float  sizeK = ShapeSize(type) * ShapeJitter(s.z * 7.31 + s.x * 1.7 + s.y * 2.9);
+                float  shape = RippleShape(v, age, s.z, type, pxAA, sizeK);
 
                 // fade in at birth, fade out at the end, weaker when far
                 float att  = (1.0 / (1.0 + rad * 0.22)) * saturate(age / 0.15);
