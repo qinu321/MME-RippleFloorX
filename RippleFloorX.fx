@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 //
-//  RippleFloorX.fx   ver 2.7
+//  RippleFloorX.fx   ver 2.8
 //
 //  Floor accessory effect (MikuMikuEffect 0.37 or later).
 //  Foot contacts are reported by RF_FootRipple.fxsub, which is assigned to
@@ -60,7 +60,7 @@ float RippleStrength <
 #define POS_ROW0     29      // per model pair: last spawn point(pairs 0..3)
 #define POS_ROW1     30      //                               (pairs 4..7)
 #define MASK_ROW     31      // foot latch: bit per slot, read from .w
-#define STEP_R       2.5     // a foot that slid this far (local unit) since its
+#define STEP_R       1.5     // a foot that slid this far (local unit) since its
                              // last ripple counts as a new step, so choreography
                              // that never lifts the foot still leaves ripples
 #define STATE_ROWS   32
@@ -270,40 +270,57 @@ float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
     pp[4] = DecodePos(posB.x); pp[5] = DecodePos(posB.y);
     pp[6] = DecodePos(posB.z); pp[7] = DecodePos(posB.w);
 
+    // The slide test must not compare one foot of a pair with the other foot's
+    // landing point (they are 5..8 units apart, which made the two feet take
+    // turns "sliding" while the model stood still).  Per pair we compare the
+    // midpoint of the feet that are on the floor with the midpoint recorded at
+    // this pair's last ripple.
     float  mask = 0.0;
     bool   pairFire[8];
     float2 pairPos[8];
 
     [unroll]
-    for (int i = 0; i < 8; ++i)
+    for (int p = 0; p < 8; ++p)
     {
-        pairFire[i] = false;
-        pairPos[i]  = float2(0.0, 0.0);
-    }
+        float4 m0 = MarkerAt(p * 2);
+        float4 m1 = MarkerAt(p * 2 + 1);
 
-    [unroll]
-    for (int f = 0; f < SLOT_MAX; ++f)
-    {
-        float4 m  = MarkerAt(f);
-        bool   on = m.w > 0.5;
+        bool on0 = m0.w > 0.5;
+        bool on1 = m1.w > 0.5;
 
-        float  w      = pow(2.0, (float)f);
-        bool   prevOn = (fmod(floor(prevMask / w), 2.0) > 0.5);
+        float w0 = pow(2.0, (float)(p * 2));
+        float w1 = w0 * 2.0;
+        bool  prev0 = (fmod(floor(prevMask / w0), 2.0) > 0.5);
+        bool  prev1 = (fmod(floor(prevMask / w1), 2.0) > 0.5);
 
-        if (on) mask += w;
+        if (on0) mask += w0;
+        if (on1) mask += w1;
 
-        int  p    = f / 2;
-        bool cool = (CurTime - PastTime(cd[p]) > gap);
+        float2 sum      = float2(0.0, 0.0);
+        int    cnt      = 0;
+        bool   edge     = false;
+        float2 edgePos  = float2(0.0, 0.0);
 
-        bool edge = on && !prevOn;                             // touched down
-        bool slid = on && (distance(m.xy, pp[p]) > StepLen());  // slid to a new spot
+        if (on0) { sum += m0.xy; cnt++; if (!prev0) { edge = true; edgePos = m0.xy; } }
+        if (on1 && !edge) { sum += m1.xy; cnt++; if (!prev1) { edge = true; edgePos = m1.xy; } }
+        else if (on1)     { sum += m1.xy; cnt++; }
 
-        if ((edge || slid) && cool && !pairFire[p])
+        pairFire[p] = false;
+        pairPos[p]  = float2(0.0, 0.0);
+
+        if (cnt > 0)
         {
-            pairFire[p] = true;
-            pairPos[p]  = m.xy;
-            cd[p]       = CurTime;
-            pp[p]       = m.xy;
+            float2 avg    = sum / (float)cnt;
+            bool   cooled = (CurTime - PastTime(cd[p]) > gap);
+            bool   slid   = (distance(avg, pp[p]) > StepLen());
+
+            if ((edge || slid) && cooled)
+            {
+                pairFire[p] = true;
+                pairPos[p]  = edge ? edgePos : avg;
+                cd[p]       = CurTime;
+                pp[p]       = avg;
+            }
         }
     }
 
