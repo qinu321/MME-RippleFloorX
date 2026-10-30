@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 //
-//  RippleFloorX.fx   ver 2.9
+//  RippleFloorX.fx   ver 3.0
 //
 //  Floor accessory effect (MikuMikuEffect 0.37 or later).
 //  Foot contacts are reported by RF_FootRipple.fxsub, which is assigned to
@@ -62,7 +62,8 @@ float RippleStrength <
 #define RIP_RADIUS   16.0    // ring radius at the end of its life (local unit)
 #define RIP_BAND     0.04    // shape band thickness (fraction of the radius)
 #define RIP_LINE_W   0.15    // line pattern half width  (local unit)
-#define RIP_ROT      4.0     // triangle / square rotation (rad / sec)
+#define RIP_ROT      4.0     // pattern rotation (rad / sec)
+#define STAR_INNER   0.45    // five point star: inner radius / outer radius
 
 #define SLOT_MAX     16      // foot marker slots to scan (must match fxsub FOOT_SLOTS)
 #define QUEUE_ROW0   0       // first state row used by the ripple queue
@@ -411,7 +412,7 @@ float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
             }
         }
 
-        int ptype = (int)fmod(floor(CurTime) + (float)wp, 4.0);
+        int ptype = (int)fmod(floor(CurTime) + (float)wp, 5.0);
         color = float4(wpos.x, wpos.y, CurTime, 1.0 + (float)ptype);
     }
     else
@@ -439,8 +440,8 @@ VS_OUT DrawFloor_VS(float4 Pos : POSITION)
     return Out;
 }
 
-// four patterns, cycled by the ripple start time (same idea as Innocencer):
-//   type 0 = rotating lines, 1 = triangle, 2 = square, 3 = circle
+// five patterns, cycled by the ripple start time (same idea as Innocencer):
+//   type 0 = rotating lines, 1 = triangle, 2 = square, 3 = circle, 4 = star
 // aa = local units per screen pixel, used to soften the hard band edges
 float RippleShape(float2 v, float age, float t0, int type, float aa)
 {
@@ -458,15 +459,43 @@ float RippleShape(float2 v, float age, float t0, int type, float aa)
     }
 
     float rad = atan2(v.y, v.x) + t0 * 13.0 + age * RIP_ROT;
-    float a;
-    if      (type == 1) a = fmod(abs(rad), radians(120.0)) + radians(30.0);
-    else if (type == 2) a = fmod(abs(rad), radians(90.0))  + radians(45.0);
-    else                a = radians(90.0);                     // circle
 
-    float w  = r * sin(a);
-    float hi = scale + max(0.10, scale * RIP_BAND);
+    // Every pattern is fitted to the same outer radius.  An n-gon whose
+    // apothem is s reaches s / cos(pi / n), so before this the triangle
+    // reached twice as far as the circle and the ring visibly "breathed"
+    // whenever the pattern changed.
+    float scl = scale;
+    float w;
 
-    return smoothstep(scale - aaW, scale + aaW, w) *
+    if (type == 4)
+    {
+        // Five point star.  The edge between a valley (radius STAR_INNER,
+        // angle 36 deg) and a tip (radius 1.0, angle 72 deg) is a straight
+        // chord, so the boundary radius is the polar form of that chord.
+        // Interpolating the radius by angle instead would give curved
+        // "petals" rather than a star.
+        float c36 = cos(radians(36.0));
+        float s36 = sin(radians(36.0));
+        float phi = abs(fmod(abs(rad), radians(72.0)) - radians(36.0));
+        float den = (STAR_INNER - c36) * sin(phi) + s36 * cos(phi);
+        w = r * den / (STAR_INNER * s36);
+    }
+    else
+    {
+        // triangle / square: the level set of r * cos(offset) is a regular
+        // n-gon; scl shrinks the apothem so the outer radius stays "scale"
+        float a;
+        if      (type == 1) { a = fmod(abs(rad), radians(120.0)) + radians(30.0);
+                              scl *= cos(radians(60.0)); }
+        else if (type == 2) { a = fmod(abs(rad), radians(90.0))  + radians(45.0);
+                              scl *= cos(radians(45.0)); }
+        else                { a = radians(90.0); }               // circle
+        w = r * sin(a);
+    }
+
+    float hi = scl + max(0.10, scl * RIP_BAND);
+
+    return smoothstep(scl - aaW, scl + aaW, w) *
            (1.0 - smoothstep(hi - aaW, hi + aaW, w));
 }
 
