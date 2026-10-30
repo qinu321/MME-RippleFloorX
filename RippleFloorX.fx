@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 //
-//  RippleFloorX.fx   ver 3.6
+//  RippleFloorX.fx   ver 3.7
 //
 //  Floor accessory effect (MikuMikuEffect 0.37 or later).
 //  Foot contacts are reported by RF_FootRipple.fxsub, which is assigned to
@@ -103,6 +103,13 @@ float4x4 WorldViewProjMatrix : WORLDVIEWPROJECTION;
 
 // accessory transparency (Tr)
 float AccessoryTrans : CONTROLOBJECT < string name = "(self)"; string item = "Tr"; >;
+
+// MMD's accessory add-mode flag (MME reference: opadd).  When it is on, MMD
+// draws with ONE/ONE, so the shader premultiplies the ring colour by its
+// coverage; with the flag off MMD uses normal alpha and the colour stays
+// straight.  That makes the add checkbox in the accessory panel a live
+// switch between the glow look and the transparent look.
+bool opadd;
 
 float2 ViewportSize : VIEWPORTPIXELSIZE;
 float  CurTime : TIME < bool SyncInEditMode = false; >;
@@ -767,15 +774,27 @@ float4 DrawFloor_PS(VS_OUT IN) : COLOR0
     float3 baseHsv = RgbToHsv(RippleColor.rgb);
     float3 col     = HsvToRgb(baseHsv.x + hueOff, baseHsv.y, baseHsv.z) * bright;
 
-    float3 c = col * (acc * RippleStrength * AccessoryTrans);
+    // straight alpha compositing (v3.7): the floor plane itself is fully
+    // transparent, only the rings are drawn.  The ring coverage becomes the
+    // alpha, so the pattern stays readable on a white stage - the old add-one
+    // blend could not do that, because white plus colour is still white.
+    // RippleStrength and the accessory Tr fade the rings through the alpha.
+    float  a = saturate(acc * RippleStrength * AccessoryTrans);
+    float3 c = col;
 
 #if DEBUG_HUD
     {
-        c += HudDiag(l);
+        float3 h = HudDiag(l);
+        c += h;
+        a = max(a, max(h.r, max(h.g, h.b)));
     }
 #endif
 
-    return float4(c, 1.0);
+    // additive path: MMD blends with ONE / ONE, so premultiply; the alpha
+    // path blends with SRCALPHA / INVSRCALPHA and keeps the straight colour
+    if (opadd) c *= a;
+
+    return float4(c, a);
 }
 
 
@@ -816,8 +835,8 @@ technique MainTec <
         ZENABLE          = TRUE;
         ZWRITEENABLE     = FALSE;
         ALPHABLENDENABLE = TRUE;
-        SrcBlend         = ONE;
-        DestBlend        = ONE;
+        // SrcBlend / DestBlend are deliberately left to MMD: the accessory
+        // panel's add-mode switch then works at run time (opadd below).
         CULLMODE         = NONE;
         VertexShader     = compile vs_3_0 DrawFloor_VS();
         PixelShader      = compile ps_3_0 DrawFloor_PS();
@@ -852,8 +871,8 @@ technique MainTecSS <
         ZENABLE          = TRUE;
         ZWRITEENABLE     = FALSE;
         ALPHABLENDENABLE = TRUE;
-        SrcBlend         = ONE;
-        DestBlend        = ONE;
+        // SrcBlend / DestBlend are deliberately left to MMD: the accessory
+        // panel's add-mode switch then works at run time (opadd below).
         CULLMODE         = NONE;
         VertexShader     = compile vs_3_0 DrawFloor_VS();
         PixelShader      = compile ps_3_0 DrawFloor_PS();

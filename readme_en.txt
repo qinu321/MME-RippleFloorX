@@ -1,4 +1,4 @@
-RippleFloorX ver 3.6
+RippleFloorX ver 3.7
 ======================================================================
 
 [ Overview ]
@@ -12,6 +12,7 @@ RippleFloorX ver 3.6
     five pointed star.
 
   No model names are hardcoded, so swapping the characters needs no file edits.
+  Note: This MME is a rework of 舞力介入P's "Innocencer". The original required editing the .fx file to add model names by hand; that pain point is gone here. Drawing on 針金P's "WorkingFloorX" and ikeno's "WF_XxShadow", it has been reworked to be binding-free — no file editing, just drag in a model and it works — and a five pointed star pattern and a controller for the ripples have been added.
 
 [ Files ]
 
@@ -83,6 +84,10 @@ RippleFloorX ver 3.6
     radial lines look the same however they are rotated.
   * Morphs can be keyframed: register Hue+ every 1000 frames, for example, and
     the pattern colour changes over time.
+  * Add mode: the accessory panel's 加算 (add) checkbox switches the look at
+    run time. On: the rings glow, which is the better look on a dark floor.
+    Off: the floor is fully transparent and the rings are solid colour, so they
+    also read on a white stage.
 
 [ Troubleshooting ]
 
@@ -120,5 +125,5 @@ RippleFloorX ver 3.6
   Credits may be left out when using this MME. If you are happy to add them,
   please write: 針金P, 舞力介入P, ikeno, 大D, 千野
 
-2026-10-30
+2026-10-31
 DeepSeek-V4.1-Flash-1017 & 千野
