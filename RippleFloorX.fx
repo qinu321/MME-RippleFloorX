@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 //
-//  RippleFloorX.fx   ver 3.3
+//  RippleFloorX.fx   ver 3.4
 //
 //  Floor accessory effect (MikuMikuEffect 0.37 or later).
 //  Foot contacts are reported by RF_FootRipple.fxsub, which is assigned to
@@ -66,6 +66,7 @@ float RippleStrength <
 #define STAR_INNER   0.45    // five point star: inner radius / outer radius
 #define SIZE_GAIN    1.5     // Sz+ at 1.0 -> x2.5, Sz- at 1.0 -> /2.5 (0 = default)
 #define JITTER_AMP   0.25    // Jitter at 1.0 -> every ripple gets +-25 % size
+#define STAR_BAND_MUL 1.25   // the star reads lighter than a square at equal width
 
 #define SLOT_MAX     16      // foot marker slots to scan (must match fxsub FOOT_SLOTS)
 #define QUEUE_ROW0   0       // first state row used by the ripple queue
@@ -504,6 +505,12 @@ float RippleShape(float2 v, float age, float t0, int type, float aa, float sizeK
     // reached twice as far as the circle and the ring visibly "breathed"
     // whenever the pattern changed.
     float scl = scale * sizeK;
+
+    // band thickness measured ACROSS the edge (world units) and the AA half
+    // width; both are expressed in w units below, so a pattern whose w changes
+    // faster per unit of r has to scale them down to keep the same look
+    float bw  = max(0.10, scl * RIP_BAND);
+    float aaw = aaW;
     float w;
 
     if (type == 4)
@@ -517,7 +524,17 @@ float RippleShape(float2 v, float age, float t0, int type, float aa, float sizeK
         float s36 = sin(radians(36.0));
         float phi = abs(fmod(abs(rad), radians(72.0)) - radians(36.0));
         float den = (STAR_INNER - c36) * sin(phi) + s36 * cos(phi);
-        w = r * den / (STAR_INNER * s36);
+
+        // k = |dw/dr|.  Near a valley the level sets sit about 1/STAR_INNER
+        // as far apart radially as at a tip, so without this the outline was
+        // a third as thick there and the star read as a much thinner line
+        // than the triangle / square.  Scaling w, the band and the AA all by k
+        // keeps the thickness perpendicular to the edge constant - the same
+        // "line weight" the other patterns have.
+        float k = den / (STAR_INNER * s36);
+        w   = r * k;
+        bw  *= k * STAR_BAND_MUL;
+        aaw *= k;
     }
     else
     {
@@ -532,10 +549,10 @@ float RippleShape(float2 v, float age, float t0, int type, float aa, float sizeK
         w = r * sin(a);
     }
 
-    float hi = scl + max(0.10, scl * RIP_BAND);
+    float hi = scl + bw;
 
-    return smoothstep(scl - aaW, scl + aaW, w) *
-           (1.0 - smoothstep(hi - aaW, hi + aaW, w));
+    return smoothstep(scl - aaw, scl + aaw, w) *
+           (1.0 - smoothstep(hi - aaw, hi + aaw, w));
 }
 
 // ---------------------------------------------------------------- colour
