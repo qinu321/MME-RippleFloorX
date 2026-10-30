@@ -1,14 +1,14 @@
 ////////////////////////////////////////////////////////////////////////////////
 //
-//  RF_FootRipple.fxsub   ver 1.0
+//  RF_FootRipple.fxsub   ver 2.1
 //
 //  Per model foot contact reporter for RippleFloorX.fx.
 //
 //  This file does NOT draw ripples.  While a foot is on the floor it writes a
 //  small marker blob into the offscreen buffer declared by RippleFloorX.fx:
 //
-//    slot   : (VertexCount * 2 + side) % 8   (a 4 x 4 px blob, 4 px above the
-//              bottom edge of the buffer, one slot every 1/32 of the width)
+//    slot   : model pair * 2 + side, 0..15   (a 4 x 4 px blob, 4 px above the
+//              bottom edge, one slot every 1/32 of the width; the pair id comes
 //    colour : (local x, local z, 0, 1)  - the contact point in floor local
 //              units.  The buffer is a float render target, so the position is
 //              exact (no 8 bit encoding, no clamped range).
@@ -21,15 +21,22 @@
 // ---------------------------------------------------------------- tuning
 #define CONTACT_RATE  0.20    // contact when sole height < rate * shin length
 #define FOOT_THICK    0.22    // ankle height above the sole (x shin length)
-#define FOOT_SLOTS    8
+#define FOOT_SLOTS    16
+#define MODEL_BUCKET  32.0    // world X bucket (local unit) used as a model id
 #define STRIP_SLOTS   32      // marker strip width, 1/32 of the buffer per slot
 
 // ---------------------------------------------------------------- floor
 float4x4 FloorWorld   : CONTROLOBJECT < string name = "(OffscreenOwner)"; >;
 float2   ViewportSize : VIEWPORTPIXELSIZE;
 
-// object vertex count, used as a simple model id for the slot
-int VertexCount;
+// model id for the slot.  VertexCount / SubsetCount separate different models,
+// and the coarse world X of the centre bone separates several copies of the
+// SAME model (MME has no per-object index, and identical copies share both
+// counts).  If two models still share a slot, change MODEL_BUCKET above so they
+// fall into different buckets, or move them apart by more than one bucket.
+int    VertexCount;
+int    SubsetCount;
+float3 Hip : CONTROLOBJECT < string name = "(self)"; string item = "センター"; >;
 
 // ---------------------------------------------------------------- bones
 float3 AnkleR : CONTROLOBJECT < string name = "(self)"; string item = "右足首"; >;
@@ -119,7 +126,10 @@ VS_OUT Marker_VS(float2 Tex : TEXCOORD0, uniform bool IsLeft)
     int  k = IsLeft ? 1 : 0;
     bool contact = FootContact(k);
 
-    int slot = (VertexCount * 2 + k) % FOOT_SLOTS;
+    // 16 slots = 8 model pairs; the pair comes from the model id above
+    int posBucket = ((int)floor(Hip.x / MODEL_BUCKET) + 64) % (FOOT_SLOTS / 2);
+    int pairId    = (VertexCount / 8 + SubsetCount + posBucket) % (FOOT_SLOTS / 2);
+    int slot      = pairId * 2 + k;
 
     // slot centre, 4 px above the bottom edge (RippleFloorX.fx samples there)
     float u = (slot + 0.5) / STRIP_SLOTS;

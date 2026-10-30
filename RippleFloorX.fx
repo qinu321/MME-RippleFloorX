@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 //
-//  RippleFloorX.fx   ver 2.0
+//  RippleFloorX.fx   ver 2.1
 //
 //  Floor accessory effect (MikuMikuEffect 0.37 or later).
 //  Foot contacts are reported by RF_FootRipple.fxsub, which is assigned to
@@ -11,7 +11,8 @@
 //      the buffer is cleared every frame, so a blob only exists while that
 //      foot is really on the floor
 //
-//  State texture (1 x 32, RGBA32F); the previous frame is read back through
+//  State texture (1 x 32, RGBA32F); rows 8..30 queue, row 31 foot latch; the
+//  previous frame is read back through
 //      row  0 ..  7 : foot slots   (contact, last spawn time, x, z)
 //      row  8 .. 31 : ripple queue (x, z, start time, 1 + pattern)
 //
@@ -51,9 +52,10 @@ float RippleStrength <
 #define RIP_LINE_W   0.15    // line pattern half width  (local unit)
 #define RIP_ROT      4.0     // triangle / square rotation (rad / sec)
 
-#define FOOT_ROWS    8       // foot state rows, kept at the front (must match fxsub)
+#define SLOT_MAX     16      // foot marker slots to scan (must match fxsub FOOT_SLOTS)
+#define QUEUE_ROW0   8       // first state row used by the ripple queue
 #define SLOT_COUNT   23      // ripple queue rows 8 .. 30
-#define MASK_ROW     31      // foot latch: bit mask, one bit per slot
+#define MASK_ROW     31      // foot latch: bit per slot, rows .w
 #define STATE_ROWS   32
 
 // trigger spacing (seconds)
@@ -195,7 +197,7 @@ float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
     float freq = (1.0 + CtrlFreqM * 2.0) / (1.0 + CtrlFreqP * 2.0);
     float gap  = TRIG_GAP * freq;
 
-    float4 nrip     = StateRow(FOOT_ROWS);          // newest ripple (row 8)
+    float4 nrip     = StateRow(QUEUE_ROW0);         // newest ripple (row 8)
     bool   canSpawn = (CurTime - PastTime(nrip.z) > gap);
     // .w is the channel that provably reads back on this machine (the .x channel
     // of this render target comes back as 0), so the mask is written to all four
@@ -208,7 +210,7 @@ float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
     float2 winPos   = float2(0.0, 0.0);
 
     [unroll]
-    for (int f = 0; f < FOOT_ROWS; ++f)
+    for (int f = 0; f < SLOT_MAX; ++f)
     {
         float4 m  = MarkerAt(f);
         bool   on = m.w > 0.5;
@@ -235,13 +237,13 @@ float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
     }
 
     // ---- rows 0..7: unused
-    if (idx < FOOT_ROWS)
+    if (idx < QUEUE_ROW0)
     {
         return float4(0.0, 0.0, 0.0, 0.0);
     }
 
     // ---- ripple queue
-    int    q     = idx - FOOT_ROWS;
+    int    q     = idx - QUEUE_ROW0;
     int    shift = winFound ? 1 : 0;
     float4 color = float4(0.0, 0.0, 0.0, 0.0);
 
@@ -253,7 +255,7 @@ float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
     }
     else if (shift <= q)
     {
-        float4 pc = StateRow(FOOT_ROWS + q - shift);
+        float4 pc = StateRow(QUEUE_ROW0 + q - shift);
         if (pc.w > 0.5 && pc.z <= CurTime && CurTime - pc.z <= RIP_MAX)
         {
             color = pc;
@@ -347,7 +349,7 @@ float3 RgbToHsv(float3 c)
 // ---------------------------------------------------------------- debug overlay
 #if DEBUG_HUD
 // DIAGNOSTIC overlay.  Colours never overwrite each other.
-//   band A (z -10.0 .. -9.0) : 8 foot slots, from (on now, on last frame)
+//   band A (z -10.0 .. -9.0) : 16 foot slots, from (on now, on last frame)
 //       GREEN  = on now AND last frame   -> steady
 //       YELLOW = on now, not last frame  -> touchdown edge
 //       CYAN   = not now, was last frame -> the lift frame
@@ -362,7 +364,7 @@ float3 HudDiag(float2 l)
 
     // ---- band A
     [unroll]
-    for (int f = 0; f < FOOT_ROWS; ++f)
+    for (int f = 0; f < SLOT_MAX; ++f)
     {
         float4 m  = MarkerAt(f);
         bool   on = m.w > 0.5;
@@ -370,8 +372,8 @@ float3 HudDiag(float2 l)
         float  w      = pow(2.0, (float)f);
         bool   prevOn = (fmod(floor(pm / w), 2.0) > 0.5);
 
-        float2 c0 = float2(-10.0 + (float)f * 2.5, -10.0);
-        float2 d  = abs(l - (c0 + float2(1.0, 0.5))) - float2(1.0, 0.5);
+        float2 c0 = float2(-10.0 + (float)f * 1.25, -10.0);
+        float2 d  = abs(l - (c0 + float2(0.55, 0.5))) - float2(0.55, 0.5);
         float  mm = 1.0 - smoothstep(-0.05, 0.05, max(d.x, d.y));
 
         float3 col = float3(0.05, 0.05, 0.05);
@@ -385,7 +387,7 @@ float3 HudDiag(float2 l)
     [loop]
     for (int i = 0; i < SLOT_COUNT; ++i)
     {
-        float4 s = tex2D(StateASamp, float2(0.5, (FOOT_ROWS + i + 0.5) / STATE_ROWS));
+        float4 s = tex2D(StateASamp, float2(0.5, (QUEUE_ROW0 + i + 0.5) / STATE_ROWS));
         float3 col = float3(0.05, 0.05, 0.05);
         if (s.w > 0.5)
         {
@@ -419,8 +421,8 @@ float4 DrawFloor_PS(VS_OUT IN) : COLOR0
     [loop]
     for (int i = 0; i < SLOT_COUNT; ++i)
     {
-        // queue rows are FOOT_ROWS .. STATE_ROWS-1 of the 1 x 32 state texture
-        float4 s = tex2D(StateASamp, float2(0.5, (FOOT_ROWS + i + 0.5) / STATE_ROWS));
+        // queue rows are QUEUE_ROW0 .. STATE_ROWS-1 of the 1 x 32 state texture
+        float4 s = tex2D(StateASamp, float2(0.5, (QUEUE_ROW0 + i + 0.5) / STATE_ROWS));
 
         if (s.w > 0.5)
         {
