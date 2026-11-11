@@ -736,11 +736,22 @@ float4 DrawFloor_PS(VS_OUT IN) : COLOR0
     // local units covered by one screen pixel (for analytic anti aliasing)
     float pxAA = max(max(length(ddx(l)), length(ddy(l))), 1.0e-4);
 
+    // The queue is a shift register: row 0 is the newest entry and every step
+    // along the row index is one step older, so once a row has no record left
+    // every row behind it is empty too.  Stopping there makes the per-pixel
+    // cost follow the number of live rings instead of SLOT_COUNT (it used to
+    // sample all 25 rows even with nothing on the floor).
+    // Dead rows are written as 0; a row that lost its entry to a timeline
+    // rewind keeps z > 0, so only a start time of 0 counts as the empty tail.
+    // tex2Dlod, not tex2D: an implicit derivative is not allowed inside a loop
+    // with a break (fxc X3526), and the state texture has a single mip.
     [loop]
     for (int i = 0; i < SLOT_COUNT; ++i)
     {
-        // queue rows are QUEUE_ROW0 .. STATE_ROWS-1 of the 1 x 32 state texture
-        float4 s = tex2D(StateASamp, float2(0.5, (QUEUE_ROW0 + i + 0.5) / STATE_ROWS));
+        float4 s = tex2Dlod(StateASamp, float4(0.5, (QUEUE_ROW0 + i + 0.5) / STATE_ROWS, 0.0, 0.0));
+
+        if (s.w <= 0.5 && s.z <= 0.0)
+            break;
 
         if (s.w > 0.5)
         {
