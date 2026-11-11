@@ -44,9 +44,9 @@ RippleFloorX ver 3.8
   6. After editing .fx you must restart MMD or reload the floor accessory;
      MME does not recompile effects while it runs.
 
-  Up to eight character models are supported. With several models, raise Freq-
-  to about 0.4-0.5 (see the table below); otherwise the rings compete for the
-  queue and appear irregularly.
+  Up to eight character models are supported. Since v3.8 the queue holds 121
+  rings, so eight models dancing together can each keep the full 5 s life;
+  only a very dense Freq+ cuts the oldest rings short.
 
 [ Controller morphs (RippleFloorCtrl.pmx, optional) ]
 
@@ -76,8 +76,8 @@ RippleFloorX ver 3.8
   * Want the five patterns at different sizes? Give a few Sz morphs different
     values. Want every single ring to differ? Turn Jitter up; it only changes
     the visible size, never how often rings spawn.
-  * With five to eight models keep Freq- at 0.25 or more (a 1.6 s interval);
-    0.4-0.5 is comfortable.
+  * Five to eight models work at the default settings; use Freq- only when you
+    want it sparser than that.
   * Life+ fills the queue faster, so the oldest rings are dropped early.
     Combine it with a higher Freq- if you want them long and plentiful.
   * Rot+ / Rot- only affect the triangle, square and star; a circle and the
@@ -106,8 +106,10 @@ RippleFloorX ver 3.8
      - Adjust with Life+/- and the Sz+/- morphs first. For the base values see
        RIP_RADIUS and RIP_MAX in docs\TECH.txt.
 
-  4. Rings appear irregularly with several models
-     - The queue is saturated; raise Freq- (0.25 or more).
+  4. Rings from several models get cut short
+     - Only with a very dense Freq+ or Life+ at maximum: the 121-slot queue
+       covers eight models at the default pace. If it still feels crowded,
+       raise Freq-.
 
   5. Changes have no effect
      - MME does not recompile .fx while it runs: restart MMD or reload the
@@ -125,5 +127,5 @@ RippleFloorX ver 3.8
   Credits may be left out when using this MME. If you are happy to add them,
   please write: 針金P, 舞力介入P, ikeno, 大D, 千野
 
-2026-10-31
+2026-11-12
 DeepSeek-V4.1-Flash-1017 & 千野
