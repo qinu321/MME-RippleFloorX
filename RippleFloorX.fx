@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 //
-//  RippleFloorX.fx   ver 3.7
+//  RippleFloorX.fx   ver 3.8
 //
 //  Floor accessory effect (MikuMikuEffect 0.37 or later).
 //  Foot contacts are reported by RF_FootRipple.fxsub, which is assigned to
@@ -11,16 +11,18 @@
 //      the buffer is cleared every frame, so a blob only exists while that
 //      foot is really on the floor
 //
-//  State texture (1 x 32, RGBA32F)
-//      rows  0 .. 24 : ripple queue   (x, z, start time, 1 + pattern)
-//      rows 25 .. 27 : per model pair last spawn time,  .rgb = 3 pairs per row
-//      rows 28 .. 30 : per model pair last spawn point, .rgb = 3 pairs per row
-//      row  31       : foot latch, one bit per slot
+//  State texture (1 x 256, RGBA32F)
+//      rows   0 .. 120 : ripple queue   (x, z, start time, 1 + pattern)
+//      rows 121 .. 128 : one row per model pair
+//                        .x  = its last spawn time (<= 0: no record yet)
+//                        .yz = its last spawn point
+//                        .a  = 1
+//      row  129        : foot latch, one bit per slot
 //
 //  WRITE RULE (learned the hard way on this machine)
 //      a state row whose written alpha is 0 is lost as a whole - every channel
-//      reads back 0, not just alpha.  So every row keeps alpha >= 1, rows 25
-//      .. 30 write 1.0 into .a and their payload into .rgb, and no fourth
+//      reads back 0, not just alpha.  So every row keeps alpha >= 1, the pair
+//      rows write 1.0 into .a and their payload into .rgb, and no fourth
 //      value is ever packed into .a.  The old theory "the .x channel is
 //      broken" was wrong: the queue rows always read .x fine, what made them
 //      different was that their alpha (1 + pattern) was never 0.
@@ -38,7 +40,7 @@
 //  real edge.
 //
 //  Idea: WorkingFloorX (HariganeP) for the offscreen hand over,
-//        Innocencer (Mairi-nyu-P) for the 24 slot ripple queue.
+//        Innocencer (Mairi-nyu-P) for the ripple queue idea.
 //
 //  Usage: load RippleFloorX.x (MMEffect 0.33 or later).
 //
@@ -73,26 +75,30 @@ float RippleStrength <
 
 #define SLOT_MAX     16      // foot marker slots to scan (must match fxsub FOOT_SLOTS)
 #define QUEUE_ROW0   0       // first state row used by the ripple queue
-#define SLOT_COUNT   25      // ripple queue rows 0 .. 24
-#define CD_ROW0      25      // per model pair last spawn time, .rgb = pairs 0, 1, 2
-#define CD_ROW1      26      //                                    pairs 3, 4, 5
-#define CD_ROW2      27      //                                    pairs 6, 7
-#define POS_ROW0     28      // per model pair last spawn point, pairs 0, 1, 2
-#define POS_ROW1     29      //                                    pairs 3, 4, 5
-#define POS_ROW2     30      //                                    pairs 6, 7
-#define MASK_ROW     31      // foot latch: bit per slot, read from .w
+#define SLOT_COUNT   121     // ripple queue rows 0 .. 120 (8 models x 2.5 ripples
+                             // per second x 5 s = 100 rings alive, plus margin)
+#define PAIR_ROW0    121     // one row per model pair, rows 121 .. 128:
+                             //   .x  = time of its last ripple (<= 0: none yet)
+                             //   .yz = the point of that ripple
+                             //   .a  = 1 (a row written with alpha 0 is dropped)
+#define MASK_ROW     129     // foot latch: bit per slot, read from .w
 #define STEP_R       1.5     // a foot that slid this far (local unit) since its
                              // last ripple counts as a new step, so choreography
                              // that never lifts the foot still leaves ripples
-#define STATE_ROWS   32
+#define STATE_ROWS   256     // power of two, because some drivers only create
+                             // POT targets; rows 130 .. 255 are unused
 
-// trigger spacing (seconds)
+// The foot marker buffer is cut into MARKER_STRIPS columns, one per slot; the
+// fxsub draws its blobs with its own STRIP_SLOTS (32), so keep this equal to
+// it.  It has nothing to do with STATE_ROWS.
+#define MARKER_STRIPS 32
+
 #define TRIG_GAP     0.40    // per model: min time between two of its own ripples
 #define FREQ_GAIN_P  2.0     // Freq+ at 1.0 -> gap / 3   = 0.13 s (dense)
 #define FREQ_GAIN_M  12.0    // Freq- at 1.0 -> gap x 13  = 5.20 s (sparse)
                              // the two sides are deliberately asymmetric: a crowded
                              // scene (8 models) needs a much longer gap, and 0.13 s is
-                             // already past what the 25 slot queue can hold
+                             // already past what the 121 slot queue can hold
 
 
 // debug overlay: 1 = paint the foot / trigger state along the floor edge
@@ -231,19 +237,34 @@ sampler MarkerSamp = sampler_state
     AddressV  = CLAMP;
 };
 
-// ------------------------------------------------------- state (1 x 32)
-// TEXTUREVALUE (frame-start snapshot), so there is no copy pass any more.
-// ver 1.8: the A/B copy lost the foot latch row on this machine.
+// ------------------------------------------------------- state (1 x 256)
+// Two targets and two passes instead of the TEXTUREVALUE snapshot.  (v3.8)
+//
+// TEXTUREVALUE hands the previous frame's texels over in constant registers,
+// and a *dynamic* index into that array (the queue shift reads row i - shift,
+// where i is the row being rendered) runs out of ps_3_0 constant registers
+// between 48 and 56 rows (fxc X4507).  Some drivers only create power-of-two
+// targets, so the old 1 x 32 layout was the largest one that mechanism could
+// do - that wall, not an MME limit, is why the queue was 25 slots.
+//
+// UpdatePairs reads StateA and writes StateB; ShiftQueue reads StateB and
+// writes StateA, so the next frame finds the state in the same texture again
+// and the technique script never has to switch buffers between frames.
 texture StateA : RENDERCOLORTARGET <
     int Width  = 1;
-    int Height = 32;
+    int Height = STATE_ROWS;
     string Format = "A32B32G32R32F";
 >;
 
+texture StateB : RENDERCOLORTARGET <
+    int Width  = 1;
+    int Height = STATE_ROWS;
+    string Format = "A32B32G32R32F";
+>;
 
 texture StateDepth : RENDERDEPTHSTENCILTARGET <
     int Width  = 1;
-    int Height = 32;
+    int Height = STATE_ROWS;
 >;
 
 sampler StateASamp = sampler_state
@@ -256,24 +277,33 @@ sampler StateASamp = sampler_state
     AddressV  = CLAMP;
 };
 
+sampler StateBSamp = sampler_state
+{
+    texture   = <StateB>;
+    MinFilter = NONE;
+    MagFilter = NONE;
+    MipFilter = NONE;
+    AddressU  = CLAMP;
+    AddressV  = CLAMP;
+};
+
 
 // ---------------------------------------------------------------- helpers
-// previous frame state, read from the frame start snapshot MME keeps in shader
-// constant registers (TEXTUREVALUE).  ver 1.8: the A/B copy pass was dropping
-// the foot latch row on this machine; this is the mechanism Innocencer uses and
-// it needs no second texture at all.
-float4 StatePre[STATE_ROWS] : TEXTUREVALUE < string TextureName = "StateA"; >;
-
-// read row i of the previous frame state
+// row i of the previous state (StateA) and of the state pass 1 produced (B)
 float4 StateRow(int i)
 {
-    return StatePre[i];
+    return tex2Dlod(StateASamp, float4(0.5, (i + 0.5) / STATE_ROWS, 0.0, 0.0));
+}
+
+float4 NewRow(int i)
+{
+    return tex2Dlod(StateBSamp, float4(0.5, (i + 0.5) / STATE_ROWS, 0.0, 0.0));
 }
 
 // marker blob of one foot slot, centred 4 pixels above the bottom edge
 float4 MarkerAt(int slot)
 {
-    return tex2D(MarkerSamp, float2((slot + 0.5) / STATE_ROWS,
+    return tex2D(MarkerSamp, float2((slot + 0.5) / MARKER_STRIPS,
                                     1.0 - 4.0 / ViewportSize.y));
 }
 
@@ -299,96 +329,32 @@ BUF_OUT Buffer_VS(float4 Pos : POSITION, float2 Tex : TEXCOORD0)
     return Out;
 }
 
-// Rows 8 .. 30 : ripple queue
-// Row  31      : foot latch - one bit per slot, set while that slot touches the
-//                floor.  ver 1.7 moved it here: rows 0..7 were never written on
-//                this machine (the queue area provably is), which is why the
-//                foot state always read back as zero.
-// pack a floor local point (x, z) into one float: quarter unit resolution, each
-// axis offset by 64 and clamped to 0..511, then z * 1024 + x.  float32 keeps
-// integers exact up to 2^24 and 1024 is a power of two, so this round trips.
-float EncodePos(float2 p)
-{
-    float x = floor(clamp((p.x + 64.0) * 4.0, 0.0, 511.0));
-    float z = floor(clamp((p.y + 64.0) * 4.0, 0.0, 511.0));
-    return x + 1024.0 * z;
-}
-
-float2 DecodePos(float v)
-{
-    float z = floor(v / 1024.0);
-    float x = v - 1024.0 * z;
-    return float2(x, z) * 0.25 - 64.0;
-}
-
-// A row that did not come back (first load, timeline rewind, a dropped write)
-// decodes to the packing default (-64, -64), outside the 20 x 20 floor.
-// Reject it before the slide test: a missing row may cost a ripple, but it
-// must never produce one every frame.
-bool HasPoint(float2 p)
-{
-    return (abs(p.x) <= 40.0) && (abs(p.y) <= 40.0);
-}
-// rows 0..24  : ripple queue (25 slots)
-// rows 25..27 : per model pair last spawn time,  .rgb = pairs 0..2 / 3..5 / 6,7
-// rows 28..30 : per model pair last spawn point, same three-per-row split
-// row  31     : foot latch, one bit per slot.  Read from .w.
+// rows 0 .. 120 : ripple queue, rows 121 .. 128 : one row per model pair,
+// row 129 : foot latch.  A pair starts a ripple when one of its feet either
+// touches down (height edge) or slides away from the point of its own last
+// ripple; the second rule exists because plenty of choreography never lifts a
+// foot high enough to make an edge.  Up to 8 pairs (16 feet) can start one in
+// the same frame.
 //
-// Rows 25..30 write 1.0 into .a and three payload values into .rgb.  That is
-// not cosmetic: on this machine a render target row whose alpha ends up 0 is
-// dropped completely, so 2.6..2.8 - which packed four pairs per row and let
-// the alpha be "the cooldown of pair 3" or "the packed point of pair 3", i.e.
-// 0 whenever fewer than four models were loaded - never stored the per pair
-// state at all.  Reading it back gave cd = 0 (cooldown never armed) and the
-// point decode(0) = (-64, -64) (slide test always true): one ripple every
-// 0.4 s while the model stood still.  Three scalars per row plus "alpha = 1"
-// is the only layout that has survived readback here.
-//
-// A pair starts a ripple when one of its feet either touches down (height edge)
-// or slides away from the point of its own last ripple.  The second rule exists
-// because plenty of choreography never lifts a foot high enough to make an edge.
-// Up to 8 pairs (16 feet) can start one in the same frame.
-float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
+// Pass 1: recompute the eight pair rows.  The pair state lives in texture rows
+// on purpose - a local cd[8]/pp[8] would stay live in ps_3_0 temporary
+// registers across the whole unrolled loop and blow the 32 register budget
+// (fxc X4505).  Rows that are not pair rows are copied straight through.
+float4 UpdatePairs_PS(float2 Tex : TEXCOORD0) : COLOR0
 {
     int idx = (int)floor(Tex.y * STATE_ROWS);
 
-    // controller: Freq+ makes the interval shorter, Freq- much longer
-    float gap = TriggerGap();
-
-    float  prevMask = StateRow(MASK_ROW).w;
-
-    // Rows 25..30: three payload scalars in .rgb, .a is always 1.0.
-    float4 cdA  = StateRow(CD_ROW0);
-    float4 cdB  = StateRow(CD_ROW1);
-    float4 cdC  = StateRow(CD_ROW2);
-    float4 posA = StateRow(POS_ROW0);
-    float4 posB = StateRow(POS_ROW1);
-    float4 posC = StateRow(POS_ROW2);
-
-    float  cd[8];
-    float2 pp[8];
-    cd[0] = cdA.x; cd[1] = cdA.y; cd[2] = cdA.z;
-    cd[3] = cdB.x; cd[4] = cdB.y; cd[5] = cdB.z;
-    cd[6] = cdC.x; cd[7] = cdC.y;
-
-    pp[0] = DecodePos(posA.x); pp[1] = DecodePos(posA.y);
-    pp[2] = DecodePos(posA.z);
-    pp[3] = DecodePos(posB.x); pp[4] = DecodePos(posB.y);
-    pp[5] = DecodePos(posB.z);
-    pp[6] = DecodePos(posC.x); pp[7] = DecodePos(posC.y);
-
-    // The slide test must not compare one foot of a pair with the other foot's
-    // landing point (they are 5..8 units apart, which made the two feet take
-    // turns "sliding" while the model stood still).  Per pair we compare the
-    // midpoint of the feet that are on the floor with the midpoint recorded at
-    // this pair's last ripple.
-    float  mask = 0.0;
-    bool   pairFire[8];
-    float2 pairPos[8];
+    float gap      = TriggerGap();
+    float prevMask = StateRow(MASK_ROW).w;
+    float mask     = 0.0;
 
     [unroll]
     for (int p = 0; p < 8; ++p)
     {
+        float4 pair = StateRow(PAIR_ROW0 + p);
+        float  cd   = pair.x;
+        float2 pp   = pair.yz;
+
         float4 m0 = MarkerAt(p * 2);
         float4 m1 = MarkerAt(p * 2 + 1);
 
@@ -403,99 +369,96 @@ float4 UpdateState_PS(float2 Tex : TEXCOORD0) : COLOR0
         if (on0) mask += w0;
         if (on1) mask += w1;
 
-        float2 sum      = float2(0.0, 0.0);
-        int    cnt      = 0;
-        bool   edge     = false;
-        float2 edgePos  = float2(0.0, 0.0);
+        float2 sum     = float2(0.0, 0.0);
+        int    cnt     = 0;
+        bool   edge    = false;
+        float2 edgePos = float2(0.0, 0.0);
 
         if (on0) { sum += m0.xy; cnt++; if (!prev0) { edge = true; edgePos = m0.xy; } }
         if (on1 && !edge) { sum += m1.xy; cnt++; if (!prev1) { edge = true; edgePos = m1.xy; } }
         else if (on1)     { sum += m1.xy; cnt++; }
 
-        pairFire[p] = false;
-        pairPos[p]  = float2(0.0, 0.0);
-
         if (cnt > 0)
         {
             float2 avg    = sum / (float)cnt;
-            bool   cooled = (CurTime - PastTime(cd[p]) > gap);
+            bool   cooled = (CurTime - PastTime(cd) > gap);
             // The midpoint only means something while both feet are down: with
             // one foot in the air the average collapses onto the standing foot,
-            // which looks like a slide on every lift.  One-foot phrases get
-            // their ripples from the landing edge instead.
-            bool   slid   = (cnt > 1) && HasPoint(pp[p]) &&
-                            (distance(avg, pp[p]) > StepLen());
+            // which looks like a slide on every lift.
+            bool   slid   = (cnt > 1) && (cd > 0.0) &&
+                            (distance(avg, pp) > StepLen());
 
             if ((edge || slid) && cooled)
             {
-                pairFire[p] = true;
-                pairPos[p]  = edge ? edgePos : avg;
-                cd[p]       = CurTime;
-                if (cnt > 1) pp[p] = avg;   // reference is only valid with both feet down
+                cd = CurTime;
+                pp = edge ? edgePos : avg;
             }
         }
+
+        if (idx == PAIR_ROW0 + p)
+            return float4(cd, pp.x, pp.y, 1.0);
     }
 
-    // how many pairs start a ripple this frame (0 .. 8)
-    int shift = 0;
-    [unroll]
-    for (int c = 0; c < 8; ++c)
-    {
-        if (pairFire[c]) shift++;
-    }
-
-    // ---- per pair state rows
-    if (idx == CD_ROW0)  return float4(cd[0], cd[1], cd[2], 1.0);
-    if (idx == CD_ROW1)  return float4(cd[3], cd[4], cd[5], 1.0);
-    if (idx == CD_ROW2)  return float4(cd[6], cd[7], 0.0, 1.0);
-    if (idx == POS_ROW0) return float4(EncodePos(pp[0]), EncodePos(pp[1]),
-                                       EncodePos(pp[2]), 1.0);
-    if (idx == POS_ROW1) return float4(EncodePos(pp[3]), EncodePos(pp[4]),
-                                       EncodePos(pp[5]), 1.0);
-    if (idx == POS_ROW2) return float4(EncodePos(pp[6]), EncodePos(pp[7]),
-                                       0.0, 1.0);
-
-    // ---- foot latch row
     if (idx == MASK_ROW)
-    {
         return float4(mask, mask, mask, mask);
-    }
 
-    // ---- ripple queue
-    int    q     = idx - QUEUE_ROW0;
-    float4 color = float4(0.0, 0.0, 0.0, 0.0);
-
-    if (q < shift)
-    {
-        // this row is one of the new entries: find the q-th firing pair
-        int    rank = 0;
-        int    wp   = 0;
-        float2 wpos = float2(0.0, 0.0);
-
-        [unroll]
-        for (int k = 0; k < 8; ++k)
-        {
-            if (pairFire[k])
-            {
-                if (rank == q) { wp = k; wpos = pairPos[k]; }
-                rank++;
-            }
-        }
-
-        int ptype = (int)fmod(floor(CurTime) + (float)wp, 5.0);
-        color = float4(wpos.x, wpos.y, CurTime, 1.0 + (float)ptype);
-    }
-    else
-    {
-        float4 pc = StateRow(QUEUE_ROW0 + q - shift);
-        if (pc.w > 0.5 && pc.z <= CurTime && CurTime - pc.z <= LifeMax())
-        {
-            color = pc;
-        }
-    }
-
-    return color;
+    return StateRow(idx);
 }
+
+
+// Pass 2: shift the queue by the number of pairs that spawned this frame.
+// A pair that spawned has cd == CurTime, so the same frame run twice is a
+// no-op: pass 1 finds no new edge and no cooled pair, shift stays 0.
+float4 ShiftQueue_PS(float2 Tex : TEXCOORD0) : COLOR0
+{
+    int idx = (int)floor(Tex.y * STATE_ROWS);
+
+    // everything outside the queue is copied through unchanged
+    if (idx >= PAIR_ROW0)
+        return NewRow(idx);
+
+    // A second update in the same frame must not shift twice.  Pass 1 leaves a
+    // pair that just spawned at cd == CurTime, so a second run of pass 2 would
+    // otherwise re-insert the same entries; the newest queue row is the tell
+    // (a frame that already produced entries has one stamped with CurTime).
+    float4 newest = NewRow(QUEUE_ROW0);
+    if (newest.w > 0.5 && newest.z == CurTime)
+        return NewRow(QUEUE_ROW0 + idx);
+
+    float  shift    = 0.0;
+    float4 newEntry = float4(0.0, 0.0, 0.0, 0.0);
+
+    [unroll]
+    for (int p = 0; p < 8; ++p)
+    {
+        float4 pair = NewRow(PAIR_ROW0 + p);
+        // pair.x > 0.0: on the very first frame every pair row is still 0 and
+        // CurTime is 0 as well, so `pair.x == CurTime` used to be true for all
+        // eight pairs at once - eight rings (five different patterns) dropped
+        // onto the floor origin.  A real spawn can never happen at CurTime 0:
+        // the `cooled` test needs CurTime to be larger than the trigger gap.
+        if (pair.x == CurTime && pair.x > 0.0)
+        {
+            if ((int)shift == idx)
+            {
+                int type = (int)fmod(floor(CurTime) + (float)p, 5.0);
+                newEntry = float4(pair.y, pair.z, CurTime, 1.0 + (float)type);
+            }
+            shift += 1.0;
+        }
+    }
+
+    if ((float)idx < shift)
+        return newEntry;
+
+    float4 pc = NewRow(QUEUE_ROW0 + idx - (int)shift);
+    if (pc.w > 0.5 && pc.z <= CurTime && CurTime - pc.z <= LifeMax())
+        return pc;
+
+    return float4(0.0, 0.0, 0.0, 0.0);
+}
+
+
 struct VS_OUT
 {
     float4 Pos   : POSITION;
@@ -624,15 +587,18 @@ float3 RgbToHsv(float3 c)
 
 // ---------------------------------------------------------------- debug overlay
 #if DEBUG_HUD
+#define HUD_SLOTS    32   // the overlay strip has room for this many queue cells
 // DIAGNOSTIC overlay.  Colours never overwrite each other.
 //   band A (z -10.0 .. -9.0) : 16 foot slots, from (on now, on last frame)
 //       GREEN  = on now AND last frame   -> steady
 //       YELLOW = on now, not last frame  -> touchdown edge
 //       CYAN   = not now, was last frame -> the lift frame
 //       BLACK  = neither
-//   band B (z -9.0 .. -8.0) : 29 ripple queue slots, colour = age
+//   band B (z -9.0 .. -8.0) : the newest HUD_SLOTS queue rows, colour = age
 //       WHITE < 1s, YELLOW < 3s, RED < 5s, BLACK = empty
 //   band C (z -8.4 .. -7.8) : purple bar = this build is compiled
+//   band D (z -7.2 .. -6.8) : one cell per pair, colour = its stored record
+//       MAGENTA = no record, GREEN = ready to fire, BLUE = still cooling down
 float3 HudDiag(float2 l)
 {
     float3 c = float3(0.0, 0.0, 0.0);
@@ -661,9 +627,9 @@ float3 HudDiag(float2 l)
 
     // ---- band B
     [loop]
-    for (int i = 0; i < SLOT_COUNT; ++i)
+    for (int i = 0; i < HUD_SLOTS; ++i)
     {
-        float4 s = tex2D(StateASamp, float2(0.5, (QUEUE_ROW0 + i + 0.5) / STATE_ROWS));
+        float4 s = StateRow(QUEUE_ROW0 + i);
         float3 col = float3(0.05, 0.05, 0.05);
         if (s.w > 0.5)
         {
@@ -672,7 +638,7 @@ float3 HudDiag(float2 l)
             else if (age < 3.0)                  col = float3(1.00, 0.85, 0.10);
             else if (age < LifeMax())            col = float3(1.00, 0.20, 0.10);
         }
-        float2 c0 = float2(-10.0 + (float)i * 0.69, -9.0);
+        float2 c0 = float2(-10.0 + (float)i * 0.62, -9.0);
         float2 d  = abs(l - (c0 + float2(0.32, 0.5))) - float2(0.32, 0.5);
         float  mm = 1.0 - smoothstep(-0.05, 0.05, max(d.x, d.y));
         c = max(c, col * mm);
@@ -682,41 +648,20 @@ float3 HudDiag(float2 l)
     float2 dbar = float2(abs(l.x) - 10.0, abs(l.y + 8.1) - 0.3);
     c += float3(0.30, 0.06, 0.55) * (1.0 - smoothstep(-0.05, 0.05, max(dbar.x, dbar.y)));
 
-    // ---- band D: the per pair state (rows 25..30), one cell per pair.
-    // These rows are the ones that silently read back as zero while their
-    // alpha was 0 (2.6..2.8), so they get a readout of their own:
-    //   magenta = no usable record  (row lost / first load / rewound)
-    //   green   = record present, cooldown expired (may fire)
-    //   blue    = record present, still cooling down
+    // ---- band D: the per pair records
     {
-        float  gapp = TriggerGap();
-        float4 cdr0 = StateRow(CD_ROW0);
-        float4 cdr1 = StateRow(CD_ROW1);
-        float4 cdr2 = StateRow(CD_ROW2);
-        float4 pnr0 = StateRow(POS_ROW0);
-        float4 pnr1 = StateRow(POS_ROW1);
-        float4 pnr2 = StateRow(POS_ROW2);
-
-        float  cdv[8];
-        float2 pnt[8];
-        cdv[0] = cdr0.x; cdv[1] = cdr0.y; cdv[2] = cdr0.z;
-        cdv[3] = cdr1.x; cdv[4] = cdr1.y; cdv[5] = cdr1.z;
-        cdv[6] = cdr2.x; cdv[7] = cdr2.y;
-        pnt[0] = DecodePos(pnr0.x); pnt[1] = DecodePos(pnr0.y);
-        pnt[2] = DecodePos(pnr0.z);
-        pnt[3] = DecodePos(pnr1.x); pnt[4] = DecodePos(pnr1.y);
-        pnt[5] = DecodePos(pnr1.z);
-        pnt[6] = DecodePos(pnr2.x); pnt[7] = DecodePos(pnr2.y);
-
+        float gapp = TriggerGap();
         [unroll]
         for (int p = 0; p < 8; ++p)
         {
+            float4 pair  = StateRow(PAIR_ROW0 + p);
+            bool   valid = pair.x > 0.0;
+            bool   ready = valid && (CurTime - PastTime(pair.x) > gapp);
+
             float3 dcol = float3(0.50, 0.00, 0.60);
-            if (HasPoint(pnt[p]))
-            {
-                dcol = (CurTime - PastTime(cdv[p]) > gapp) ? float3(0.15, 1.00, 0.30)
-                                                           : float3(0.10, 0.55, 1.00);
-            }
+            if (valid) dcol = ready ? float3(0.15, 1.00, 0.30)
+                                    : float3(0.10, 0.55, 1.00);
+
             float2 dc0 = float2(-9.0 + (float)p * 2.0, -7.2);
             float2 dd  = abs(l - (dc0 + float2(0.8, 0.4))) - float2(0.8, 0.4);
             float  dm  = 1.0 - smoothstep(-0.05, 0.05, max(dd.x, dd.y));
@@ -740,7 +685,7 @@ float4 DrawFloor_PS(VS_OUT IN) : COLOR0
     // along the row index is one step older, so once a row has no record left
     // every row behind it is empty too.  Stopping there makes the per-pixel
     // cost follow the number of live rings instead of SLOT_COUNT (it used to
-    // sample all 25 rows even with nothing on the floor).
+    // sample every row even when nothing was on the floor).
     // Dead rows are written as 0; a row that lost its entry to a timeline
     // rewind keeps z > 0, so only a start time of 0 counts as the empty tail.
     // tex2Dlod, not tex2D: an implicit derivative is not allowed inside a loop
@@ -810,26 +755,29 @@ float4 DrawFloor_PS(VS_OUT IN) : COLOR0
 
 
 // ---------------------------------------------------------------- technique
-// The whole script has to run exactly once per frame, and only in the pass
-// where the off-screen foot markers are valid.  1.3 declares MMDPass
-// explicitly and gives the other passes an empty technique: while a motion
-// plays back, MMD re-runs its z-plot / shadow passes every frame, and the
-// update script was being executed there too - with an empty marker buffer.
-// That wrote "not touching" into the foot rows, which the next frame read back
-// as a touchdown.  The HUD could not show it because the displayed pass was
-// the good one.
+// Per frame: UpdatePairs (A -> B), ShiftQueue (B -> A), DrawFloor (reads A).
+// The chain runs in the object pass and again in object_ss; the second run is
+// a no-op by construction (a pair that just spawned has cd == CurTime, so it
+// is neither an edge nor cooled and shift stays 0), which is why the update can
+// stay in both techniques.  1.3 declares MMDPass explicitly and gives the other
+// passes an empty technique: while a motion plays back MMD re-runs its z-plot /
+// shadow passes every frame, and the update script was being executed there
+// too - with an empty marker buffer.
 technique MainTec <
     string MMDPass = "object";
     string Script =
+        "RenderColorTarget0=StateB;"
+        "RenderDepthStencilTarget=StateDepth;"
+        "Pass=UpdatePairs;"
         "RenderColorTarget0=StateA;"
         "RenderDepthStencilTarget=StateDepth;"
-        "Pass=UpdateState;"
+        "Pass=ShiftQueue;"
         "RenderColorTarget0=;"
         "RenderDepthStencilTarget=;"
         "Pass=DrawFloor;";
 >
 {
-    pass UpdateState < string Script = "Draw=Buffer;";>
+    pass UpdatePairs < string Script = "Draw=Buffer;";>
     {
         ZENABLE          = FALSE;
         ZWRITEENABLE     = FALSE;
@@ -838,7 +786,19 @@ technique MainTec <
         COLORWRITEENABLE = 0xF;     // RGBA: never inherit a masked channel write
         CULLMODE         = NONE;
         VertexShader     = compile vs_3_0 Buffer_VS();
-        PixelShader      = compile ps_3_0 UpdateState_PS();
+        PixelShader      = compile ps_3_0 UpdatePairs_PS();
+    }
+
+    pass ShiftQueue < string Script = "Draw=Buffer;";>
+    {
+        ZENABLE          = FALSE;
+        ZWRITEENABLE     = FALSE;
+        ALPHABLENDENABLE = FALSE;
+        ALPHATESTENABLE  = FALSE;
+        COLORWRITEENABLE = 0xF;
+        CULLMODE         = NONE;
+        VertexShader     = compile vs_3_0 Buffer_VS();
+        PixelShader      = compile ps_3_0 ShiftQueue_PS();
     }
 
     pass DrawFloor
@@ -857,24 +817,39 @@ technique MainTec <
 technique MainTecSS <
     string MMDPass = "object_ss";
     string Script =
+        "RenderColorTarget0=StateB;"
+        "RenderDepthStencilTarget=StateDepth;"
+        "Pass=UpdatePairs;"
         "RenderColorTarget0=StateA;"
         "RenderDepthStencilTarget=StateDepth;"
-        "Pass=UpdateState;"
+        "Pass=ShiftQueue;"
         "RenderColorTarget0=;"
         "RenderDepthStencilTarget=;"
         "Pass=DrawFloor;";
 >
 {
-    pass UpdateState < string Script = "Draw=Buffer;";>
+    pass UpdatePairs < string Script = "Draw=Buffer;";>
     {
         ZENABLE          = FALSE;
         ZWRITEENABLE     = FALSE;
         ALPHABLENDENABLE = FALSE;
-        ALPHATESTENABLE  = FALSE;   // a row written with alpha 0 is dropped
-        COLORWRITEENABLE = 0xF;     // RGBA: never inherit a masked channel write
+        ALPHATESTENABLE  = FALSE;
+        COLORWRITEENABLE = 0xF;
         CULLMODE         = NONE;
         VertexShader     = compile vs_3_0 Buffer_VS();
-        PixelShader      = compile ps_3_0 UpdateState_PS();
+        PixelShader      = compile ps_3_0 UpdatePairs_PS();
+    }
+
+    pass ShiftQueue < string Script = "Draw=Buffer;";>
+    {
+        ZENABLE          = FALSE;
+        ZWRITEENABLE     = FALSE;
+        ALPHABLENDENABLE = FALSE;
+        ALPHATESTENABLE  = FALSE;
+        COLORWRITEENABLE = 0xF;
+        CULLMODE         = NONE;
+        VertexShader     = compile vs_3_0 Buffer_VS();
+        PixelShader      = compile ps_3_0 ShiftQueue_PS();
     }
 
     pass DrawFloor
